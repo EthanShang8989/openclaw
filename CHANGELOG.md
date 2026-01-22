@@ -28,6 +28,7 @@ Docs: https://docs.clawd.bot
 - Model picker: list the full catalog when no model allowlist is configured.
 - Discord: honor wildcard channel configs via shared match helpers. (#1334) Thanks @pvoo.
 - BlueBubbles: resolve short message IDs safely and expose full IDs in templates. (#1387) Thanks @tyler6204.
+- Zalouser: parse zca JSON output when logs or ANSI codes are present. (#1379) Thanks @ptn1411.
 - Infra: preserve fetch helper methods when wrapping abort signals. (#1387)
 
 ## 2026.1.20
