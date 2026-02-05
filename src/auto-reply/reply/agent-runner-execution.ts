@@ -10,6 +10,7 @@ import { runCliAgent } from "../../agents/cli-runner.js";
 import { getCliSessionId } from "../../agents/cli-session.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
+import { resolveSandboxContext } from "../../agents/sandbox.js";
 import {
   isCompactionFailureError,
   isContextOverflowError,
@@ -175,6 +176,13 @@ export async function runAgentTurnWithFallback(params: {
             return (async () => {
               let lifecycleTerminalEmitted = false;
               try {
+                // Resolve sandbox context for CLI execution
+                const sandboxContext = await resolveSandboxContext({
+                  config: params.followupRun.run.config,
+                  sessionKey: params.sessionKey,
+                  workspaceDir: params.followupRun.run.workspaceDir,
+                });
+
                 const result = await runCliAgent({
                   sessionId: params.followupRun.run.sessionId,
                   sessionKey: params.sessionKey,
@@ -191,6 +199,7 @@ export async function runAgentTurnWithFallback(params: {
                   ownerNumbers: params.followupRun.run.ownerNumbers,
                   cliSessionId,
                   images: params.opts?.images,
+                  sandboxContext: sandboxContext ?? undefined,
                 });
 
                 // CLI backends don't emit streaming assistant events, so we need to

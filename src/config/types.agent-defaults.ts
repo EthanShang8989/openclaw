@@ -52,9 +52,9 @@ export type CliBackendConfig = {
   /** Base args applied to every invocation. */
   args?: string[];
   /** Output parsing mode (default: json). */
-  output?: "json" | "text" | "jsonl";
+  output?: "json" | "text" | "jsonl" | "stream-jsonl";
   /** Output parsing mode when resuming a CLI session. */
-  resumeOutput?: "json" | "text" | "jsonl";
+  resumeOutput?: "json" | "text" | "jsonl" | "stream-jsonl";
   /** Prompt input mode (default: arg). */
   input?: "arg" | "stdin";
   /** Max prompt length for arg mode (if exceeded, stdin is used). */
@@ -89,6 +89,24 @@ export type CliBackendConfig = {
   imageMode?: "repeat" | "list";
   /** Serialize runs for this CLI. */
   serialize?: boolean;
+  /** Enable CLI's own tool capabilities (default: false). */
+  enableTools?: boolean;
+  /**
+   * Sandbox mode for CLI execution:
+   * - "off": never use sandbox
+   * - "inherit": use sandbox if session is sandboxed (default)
+   * - "always": always use sandbox if available
+   */
+  sandboxMode?: "off" | "inherit" | "always";
+  /** CLI-specific sandbox configuration overrides. */
+  sandboxOverrides?: {
+    /** Docker image for CLI sandbox (overrides global sandbox image). */
+    image?: string;
+    /** Additional bind mounts for CLI sandbox. */
+    binds?: string[];
+    /** Additional environment variables for CLI sandbox. */
+    env?: Record<string, string>;
+  };
 };
 
 export type AgentDefaultsConfig = {
