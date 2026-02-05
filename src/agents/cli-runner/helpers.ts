@@ -8,6 +8,7 @@ import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { CliBackendConfig } from "../../config/types.js";
 import type { EmbeddedContextFile } from "../pi-embedded-helpers.js";
+import type { DetectedInteraction, InteractionOption } from "./interaction-manager.js";
 import { runExec } from "../../process/exec.js";
 import { buildTtsSystemPromptHint } from "../../tts/tts.js";
 import { escapeRegExp, isRecord } from "../../utils.js";
@@ -206,6 +207,7 @@ export function buildSystemPrompt(params: {
   contextFiles?: EmbeddedContextFile[];
   modelDisplay: string;
   agentId?: string;
+  sessionKey?: string;
 }) {
   const defaultModelRef = resolveDefaultModelForAgent({
     cfg: params.config ?? {},
@@ -245,6 +247,7 @@ export function buildSystemPrompt(params: {
     contextFiles: params.contextFiles,
     ttsHint,
     memoryCitationsMode: params.config?.memory?.citations,
+    sessionKey: params.sessionKey,
   });
 }
 
@@ -414,6 +417,8 @@ export type CliToolResultEvent = {
 export type CliStreamJsonlOutput = CliOutput & {
   toolUses: CliToolUseEvent[];
   toolResults: CliToolResultEvent[];
+  /** 检测到的待交互请求（AskUserQuestion 等） */
+  pendingInteraction?: DetectedInteraction;
 };
 
 function extractToolResultText(content: unknown): string {
@@ -433,6 +438,71 @@ function extractToolResultText(content: unknown): string {
     }
   }
   return texts.join("");
+}
+
+/**
+ * 检测待交互请求：查找最后一个没有对应 tool_result 的 AskUserQuestion/ExitPlanMode
+ */
+function detectPendingInteraction(
+  toolUses: CliToolUseEvent[],
+  toolResults: CliToolResultEvent[],
+): DetectedInteraction | undefined {
+  // 构建已完成的 tool_use_id 集合
+  const completedIds = new Set(toolResults.map((r) => r.toolUseId));
+
+  // 从后往前查找第一个未完成的交互工具调用
+  for (let i = toolUses.length - 1; i >= 0; i--) {
+    const toolUse = toolUses[i];
+    if (!toolUse) {
+      continue;
+    }
+
+    // 跳过已完成的工具调用
+    if (completedIds.has(toolUse.id)) {
+      continue;
+    }
+
+    // 检测 AskUserQuestion
+    if (toolUse.name === "AskUserQuestion") {
+      const input = toolUse.input;
+      const questions = Array.isArray(input.questions) ? input.questions : [];
+      const firstQuestion = questions[0];
+
+      if (firstQuestion && isRecord(firstQuestion)) {
+        const question = typeof firstQuestion.question === "string" ? firstQuestion.question : "";
+        const multiSelect = Boolean(firstQuestion.multiSelect);
+        const rawOptions = Array.isArray(firstQuestion.options) ? firstQuestion.options : [];
+        const options: InteractionOption[] = rawOptions
+          .filter((opt): opt is Record<string, unknown> => isRecord(opt))
+          .map((opt) => ({
+            label: typeof opt.label === "string" ? opt.label : "",
+            description: typeof opt.description === "string" ? opt.description : undefined,
+          }))
+          .filter((opt) => opt.label);
+
+        if (question) {
+          return {
+            type: "ask_user_question",
+            toolCallId: toolUse.id,
+            question,
+            options: options.length > 0 ? options : undefined,
+            multiSelect,
+          };
+        }
+      }
+    }
+
+    // 检测 ExitPlanMode（Plan 确认）
+    if (toolUse.name === "ExitPlanMode") {
+      return {
+        type: "plan_approval",
+        toolCallId: toolUse.id,
+        question: "AI 已完成计划制定，是否批准执行？",
+      };
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -568,7 +638,10 @@ export function parseCliStreamJsonl(
   // 合并所有文本块（最后一个 assistant 消息的文本通常是最终回复）
   const text = texts.join("").trim();
 
-  return { text, sessionId, usage, toolUses, toolResults };
+  // 检测待交互请求：查找最后一个没有对应 tool_result 的 AskUserQuestion/ExitPlanMode
+  const pendingInteraction = detectPendingInteraction(toolUses, toolResults);
+
+  return { text, sessionId, usage, toolUses, toolResults, pendingInteraction };
 }
 
 export function resolveSystemPromptUsage(params: {
