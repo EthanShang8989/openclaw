@@ -305,6 +305,25 @@ export const dispatchTelegramMessage = async ({
       disableBlockStreaming,
       onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
       onModelSelected,
+      onTypingTimeout: async (elapsedMs: number) => {
+        const minutes = Math.floor(elapsedMs / 60_000);
+        const timeText = minutes >= 1 ? `${minutes} 分钟` : "不到 1 分钟";
+        const reminderText = `仍在思考中，已处理 ${timeText}...`;
+        await deliverReplies({
+          replies: [{ text: reminderText }],
+          chatId: String(chatId),
+          token: opts.token,
+          runtime,
+          bot,
+          replyToMode,
+          textLimit,
+          thread: threadSpec,
+          tableMode,
+          chunkMode,
+          linkPreview: telegramCfg.linkPreview,
+          replyQuoteText,
+        });
+      },
     },
   });
   draftStream?.stop();

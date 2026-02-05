@@ -116,6 +116,7 @@ export async function getReplyFromConfig(
     typingIntervalSeconds,
     silentToken: SILENT_REPLY_TOKEN,
     log: defaultRuntime.log,
+    onTypingTimeout: opts?.onTypingTimeout,
   });
   opts?.onTypingController?.(typing);
 
