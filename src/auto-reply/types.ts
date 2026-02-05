@@ -53,6 +53,8 @@ export type GetReplyOptions = {
   hasRepliedRef?: { value: boolean };
   /** CLI 交互回答（当用户回答了 AskUserQuestion 等问题时） */
   cliInteractionAnswer?: CliInteractionAnswer;
+  /** Typing 超时后的回调，用于发送提示消息。elapsedMs 是已处理的毫秒数 */
+  onTypingTimeout?: (elapsedMs: number) => Promise<void> | void;
 };
 
 export type ReplyPayload = {

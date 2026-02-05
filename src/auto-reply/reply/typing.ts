@@ -17,6 +17,10 @@ export function createTypingController(params: {
   typingTtlMs?: number;
   silentToken?: string;
   log?: (message: string) => void;
+  /** 超时后的回调，用于发送提示消息 */
+  onTypingTimeout?: (elapsedMs: number) => Promise<void> | void;
+  /** 超时提示的重复间隔（毫秒），默认 5 分钟 */
+  typingTimeoutReminderIntervalMs?: number;
 }): TypingController {
   const {
     onReplyStart,
@@ -24,11 +28,15 @@ export function createTypingController(params: {
     typingTtlMs = 2 * 60_000,
     silentToken = SILENT_REPLY_TOKEN,
     log,
+    onTypingTimeout,
+    typingTimeoutReminderIntervalMs = 5 * 60_000,
   } = params;
   let started = false;
   let active = false;
   let runComplete = false;
   let dispatchIdle = false;
+  let typingStartedAt: number | undefined;
+  let typingTimeoutReminderTimer: NodeJS.Timeout | undefined;
   // Important: callbacks (tool/block streaming) can fire late (after the run completed),
   // especially when upstream event emitters don't await async listeners.
   // Once we stop typing, we "seal" the controller so late events can't restart typing forever.
@@ -63,6 +71,10 @@ export function createTypingController(params: {
       clearInterval(typingTimer);
       typingTimer = undefined;
     }
+    if (typingTimeoutReminderTimer) {
+      clearInterval(typingTimeoutReminderTimer);
+      typingTimeoutReminderTimer = undefined;
+    }
     resetCycle();
     sealed = true;
   };
@@ -85,7 +97,35 @@ export function createTypingController(params: {
         return;
       }
       log?.(`typing TTL reached (${formatTypingTtl(typingTtlMs)}); stopping typing indicator`);
-      cleanup();
+      // 停止 typing 循环但不完全 cleanup，继续发送超时提醒
+      if (typingTimer) {
+        clearInterval(typingTimer);
+        typingTimer = undefined;
+      }
+      if (typingTtlTimer) {
+        clearTimeout(typingTtlTimer);
+        typingTtlTimer = undefined;
+      }
+      // 触发超时回调
+      if (onTypingTimeout && typingStartedAt) {
+        const elapsedMs = Date.now() - typingStartedAt;
+        void onTypingTimeout(elapsedMs);
+        // 启动定时提醒
+        if (typingTimeoutReminderIntervalMs > 0 && !typingTimeoutReminderTimer) {
+          typingTimeoutReminderTimer = setInterval(() => {
+            if (sealed || runComplete) {
+              if (typingTimeoutReminderTimer) {
+                clearInterval(typingTimeoutReminderTimer);
+                typingTimeoutReminderTimer = undefined;
+              }
+              return;
+            }
+            if (typingStartedAt) {
+              void onTypingTimeout(Date.now() - typingStartedAt);
+            }
+          }, typingTimeoutReminderIntervalMs);
+        }
+      }
     }, typingTtlMs);
   };
 
@@ -113,6 +153,7 @@ export function createTypingController(params: {
       return;
     }
     started = true;
+    typingStartedAt = Date.now();
     await triggerTyping();
   };
 
