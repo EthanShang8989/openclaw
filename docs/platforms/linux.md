@@ -92,3 +92,107 @@ Enable it:
 ```
 systemctl --user enable --now openclaw-gateway[-<profile>].service
 ```
+
+## Troubleshooting
+
+Common issues when deploying on Linux VPS:
+
+### NVM PATH not available in systemd
+
+NVM only loads in interactive shells. systemd services cannot find `node`.
+
+**Solution A**: Create symlinks in `/usr/local/bin`:
+
+```bash
+NODE_DIR=/root/.nvm/versions/node/v22.22.0/bin
+ln -sf $NODE_DIR/node /usr/local/bin/node
+ln -sf $NODE_DIR/npm /usr/local/bin/npm
+ln -sf $NODE_DIR/npx /usr/local/bin/npx
+ln -sf $NODE_DIR/pnpm /usr/local/bin/pnpm
+```
+
+**Solution B**: Create `/etc/profile.d/nvm.sh` for interactive sessions:
+
+```bash
+cat > /etc/profile.d/nvm.sh << 'EOF'
+if [ -d "/root/.nvm/versions/node" ]; then
+    NODE_PATH=$(find /root/.nvm/versions/node -maxdepth 1 -type d -name "v*" | sort -V | tail -1)
+    [ -n "$NODE_PATH" ] && export PATH="$NODE_PATH/bin:$PATH"
+fi
+EOF
+```
+
+### Missing lsof
+
+`openclaw gateway --force` requires lsof to check port usage.
+
+```bash
+apt install -y lsof
+```
+
+### Claude CLI cannot run as root
+
+`--dangerously-skip-permissions` fails with root/sudo privileges.
+
+**Solution**: Create a dedicated user:
+
+```bash
+useradd -r -m -s /bin/bash openclaw
+# Copy Claude CLI credentials
+cp -r /root/.claude /home/openclaw/
+cp /root/.claude.json /home/openclaw/
+chown -R openclaw:openclaw /home/openclaw/.claude*
+```
+
+Run the systemd service as that user (`User=openclaw`).
+
+### Telegram pairing required repeatedly
+
+The credentials file (`~/.openclaw/credentials/telegram-allowFrom.json`) has wrong ownership.
+
+**Solution**: Ensure the file is owned by the service user:
+
+```bash
+chown -R openclaw:openclaw /home/openclaw/.openclaw/credentials/
+```
+
+### Claude CLI not found (spawn claude ENOENT)
+
+The `claude` binary is not in PATH for the service user.
+
+**Solution**: Create symlink or reinstall:
+
+```bash
+# Option 1: Symlink (if already installed globally)
+ln -sf /root/.nvm/versions/node/v22.22.0/bin/claude /usr/local/bin/claude
+
+# Option 2: Reinstall for the service user
+npm install -g @anthropic-ai/claude-code
+```
+
+### Gateway auth token not configured
+
+Service fails with "gateway auth token not configured".
+
+**Solution**: Generate and set the token:
+
+```bash
+# Generate token
+TOKEN=$(openssl rand -hex 32)
+echo $TOKEN > /root/.openclaw-token
+
+# Add to systemd service
+Environment=OPENCLAW_GATEWAY_TOKEN=$TOKEN
+```
+
+### NVM directory not accessible
+
+If NVM is installed under `/root`, other users cannot access it.
+
+**Solution**: Make NVM directories accessible:
+
+```bash
+chmod 755 /root
+chmod 755 /root/.nvm
+chmod -R 755 /root/.nvm/versions
+```
