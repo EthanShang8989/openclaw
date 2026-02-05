@@ -49,8 +49,9 @@ const DEFAULT_CLAUDE_BACKEND: CliBackendConfig = {
   systemPromptWhen: "first",
   clearEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_OLD"],
   serialize: true,
-  // Default: tools disabled, sandbox inherited from session
-  enableTools: false,
+  // Enable full tool capabilities (Bash/Read/Write/Edit/etc.)
+  enableTools: true,
+  // Sandbox mode inherited from session context
   sandboxMode: "inherit",
 };
 
