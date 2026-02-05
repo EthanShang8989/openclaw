@@ -29,16 +29,17 @@ const CLAUDE_MODEL_ALIASES: Record<string, string> = {
 
 const DEFAULT_CLAUDE_BACKEND: CliBackendConfig = {
   command: "claude",
-  args: ["-p", "--output-format", "json", "--dangerously-skip-permissions"],
+  args: ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
   resumeArgs: [
     "-p",
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--dangerously-skip-permissions",
     "--resume",
     "{sessionId}",
   ],
-  output: "json",
+  output: "stream-jsonl",
   input: "arg",
   modelArg: "--model",
   modelAliases: CLAUDE_MODEL_ALIASES,
@@ -50,6 +51,9 @@ const DEFAULT_CLAUDE_BACKEND: CliBackendConfig = {
   systemPromptWhen: "first",
   clearEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_OLD"],
   serialize: true,
+  // Default: tools disabled, sandbox inherited from session
+  enableTools: false,
+  sandboxMode: "inherit",
 };
 
 const DEFAULT_CODEX_BACKEND: CliBackendConfig = {
@@ -74,6 +78,9 @@ const DEFAULT_CODEX_BACKEND: CliBackendConfig = {
   imageArg: "--image",
   imageMode: "repeat",
   serialize: true,
+  // Default: tools disabled, sandbox inherited from session
+  enableTools: false,
+  sandboxMode: "inherit",
 };
 
 function normalizeBackendKey(key: string): string {
