@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliBackendConfig } from "../config/types.js";
 import { runCliAgent } from "./cli-runner.js";
-import { cleanupSuspendedCliProcesses } from "./cli-runner/helpers.js";
+import { cleanupSuspendedCliProcesses, parseCliStreamJsonl } from "./cli-runner/helpers.js";
 
 const runCommandWithTimeoutMock = vi.fn();
 const runExecMock = vi.fn();
@@ -57,6 +57,61 @@ describe("runCliAgent resume cleanup", () => {
     expect(pkillArgs[1]).toContain("codex");
     expect(pkillArgs[1]).toContain("resume");
     expect(pkillArgs[1]).toContain("thread-123");
+  });
+
+  it("single-quotes all sandbox command args when using docker exec", async () => {
+    runExecMock
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    runCommandWithTimeoutMock.mockResolvedValueOnce({
+      stdout: '{"thread_id":"t1","item":{"type":"message","text":"ok"}}',
+      stderr: "",
+      code: 0,
+      signal: null,
+      killed: false,
+    });
+
+    await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      prompt: "hello; echo pwned",
+      provider: "codex-cli",
+      model: "gpt-5.2-codex",
+      timeoutMs: 1_000,
+      runId: "run-sandbox-1",
+      sandboxContext: {
+        enabled: true,
+        sessionKey: "s1",
+        workspaceDir: "/tmp",
+        agentWorkspaceDir: "/tmp",
+        workspaceAccess: "rw",
+        containerName: "openclaw-test",
+        containerWorkdir: "/workspace",
+        docker: {
+          image: "test",
+          containerPrefix: "openclaw",
+          workdir: "/workspace",
+          readOnlyRoot: false,
+          tmpfs: [],
+          network: "none",
+          capDrop: [],
+          env: {},
+        },
+        tools: {},
+        browserAllowHostControl: false,
+      },
+    });
+
+    expect(runCommandWithTimeoutMock).toHaveBeenCalledTimes(1);
+    const argv = runCommandWithTimeoutMock.mock.calls[0]?.[0] as string[];
+    expect(argv[0]).toBe("docker");
+    expect(argv).toContain("sh");
+    expect(argv).toContain("-lc");
+    const shellCommand = argv[argv.length - 1] ?? "";
+    expect(shellCommand).toContain("'codex'");
+    expect(shellCommand).toContain("'hello; echo pwned'");
+    expect(shellCommand).not.toContain(" hello; echo pwned");
   });
 });
 
@@ -139,5 +194,36 @@ describe("cleanupSuspendedCliProcesses", () => {
     const killCall = runExecMock.mock.calls[1] ?? [];
     expect(killCall[0]).toBe("kill");
     expect(killCall[1]).toEqual(["-9", "50", "51"]);
+  });
+});
+
+describe("parseCliStreamJsonl", () => {
+  it("extracts text from array-form tool_result content blocks", () => {
+    const raw = [
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sid-1",
+        message: {
+          content: [{ type: "tool_use", id: "toolu_1", name: "web_search", input: { q: "x" } }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [{ type: "text", text: "result line 1" }, { type: "text", text: " + line 2" }],
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseCliStreamJsonl(raw, { command: "claude" } as CliBackendConfig);
+    expect(parsed?.toolResults).toEqual([
+      { toolUseId: "toolu_1", content: "result line 1 + line 2", isError: false },
+    ]);
   });
 });

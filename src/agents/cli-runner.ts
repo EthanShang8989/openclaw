@@ -2,6 +2,7 @@ import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
+import type { SandboxContext } from "./sandbox/types.js";
 import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
@@ -9,6 +10,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveSessionAgentIds } from "./agent-scope.js";
+import { buildDockerExecArgs, buildSandboxEnv } from "./bash-tools.shared.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "./bootstrap-files.js";
 import { resolveCliBackendConfig } from "./cli-backends.js";
 import {
@@ -21,16 +23,75 @@ import {
   normalizeCliModel,
   parseCliJson,
   parseCliJsonl,
+  parseCliStreamJsonl,
   resolvePromptInput,
   resolveSessionIdToSend,
   resolveSystemPromptUsage,
   writeCliImages,
 } from "./cli-runner/helpers.js";
+import { writeCliEventsToSession } from "./cli-runner/session-writer.js";
 import { resolveOpenClawDocsPath } from "./docs-path.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
 import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-helpers.js";
 
 const log = createSubsystemLogger("agent/claude-cli");
+
+const DEFAULT_SANDBOX_PATH =
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin";
+
+function quoteShellArg(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Resolve whether CLI should run in sandbox based on backend config and context.
+ */
+function shouldRunCliInSandbox(
+  backend: import("../config/types.js").CliBackendConfig,
+  sandboxContext?: SandboxContext,
+): boolean {
+  if (backend.sandboxMode === "off") {
+    return false;
+  }
+  if (backend.sandboxMode === "always") {
+    return Boolean(sandboxContext?.enabled);
+  }
+  // Default: "inherit" - use sandbox if session is sandboxed
+  return Boolean(sandboxContext?.enabled);
+}
+
+/**
+ * Build docker exec command for running CLI in sandbox.
+ */
+function buildCliSandboxCommand(params: {
+  sandbox: SandboxContext;
+  backend: import("../config/types.js").CliBackendConfig;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}): string[] {
+  // Merge sandbox env with backend-specific overrides
+  const sandboxEnv = buildSandboxEnv({
+    defaultPath: DEFAULT_SANDBOX_PATH,
+    paramsEnv: params.env,
+    sandboxEnv: {
+      ...params.sandbox.docker.env,
+      ...params.backend.sandboxOverrides?.env,
+    },
+    containerWorkdir: params.sandbox.containerWorkdir,
+  });
+
+  // Build the full CLI command string (command + args), always single-quote args.
+  const cliCommand = [params.command, ...params.args].map((arg) => quoteShellArg(arg)).join(" ");
+
+  return buildDockerExecArgs({
+    containerName: params.sandbox.containerName,
+    command: cliCommand,
+    workdir: params.sandbox.containerWorkdir,
+    env: sandboxEnv,
+    tty: false,
+  });
+}
 
 export async function runCliAgent(params: {
   sessionId: string;
@@ -49,6 +110,7 @@ export async function runCliAgent(params: {
   ownerNumbers?: string[];
   cliSessionId?: string;
   images?: ImageContent[];
+  sandboxContext?: SandboxContext;
 }): Promise<EmbeddedPiRunResult> {
   const started = Date.now();
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
@@ -63,10 +125,11 @@ export async function runCliAgent(params: {
   const normalizedModel = normalizeCliModel(modelId, backend);
   const modelDisplay = `${params.provider}/${modelId}`;
 
-  const extraSystemPrompt = [
-    params.extraSystemPrompt?.trim(),
-    "Tools are disabled in this session. Do not call tools.",
-  ]
+  // Only disable tools if enableTools is not explicitly set to true
+  const toolsDisabledPrompt = backend.enableTools
+    ? undefined
+    : "Tools are disabled in this session. Do not call tools.";
+  const extraSystemPrompt = [params.extraSystemPrompt?.trim(), toolsDisabledPrompt]
     .filter(Boolean)
     .join("\n");
 
@@ -209,7 +272,14 @@ export async function runCliAgent(params: {
         for (const key of backend.clearEnv ?? []) {
           delete next[key];
         }
-        return next;
+        // 过滤掉 undefined 值以满足 Record<string, string> 类型
+        const filtered: Record<string, string> = {};
+        for (const [key, value] of Object.entries(next)) {
+          if (value !== undefined) {
+            filtered[key] = value;
+          }
+        }
+        return filtered;
       })();
 
       // Cleanup suspended processes that have accumulated (regardless of sessionId)
@@ -218,12 +288,36 @@ export async function runCliAgent(params: {
         await cleanupResumeProcesses(backend, cliSessionIdToSend);
       }
 
-      const result = await runCommandWithTimeout([backend.command, ...args], {
-        timeoutMs: params.timeoutMs,
-        cwd: workspaceDir,
-        env,
-        input: stdinPayload,
-      });
+      // Determine if CLI should run in sandbox
+      const useSandbox = shouldRunCliInSandbox(backend, params.sandboxContext);
+      let result: Awaited<ReturnType<typeof runCommandWithTimeout>>;
+
+      if (useSandbox && params.sandboxContext?.enabled) {
+        // Run CLI inside sandbox container via docker exec
+        const dockerArgs = buildCliSandboxCommand({
+          sandbox: params.sandboxContext,
+          backend,
+          command: backend.command,
+          args,
+          env,
+        });
+        log.info(
+          `cli sandbox exec: container=${params.sandboxContext.containerName} command=${backend.command}`,
+        );
+        result = await runCommandWithTimeout(["docker", ...dockerArgs], {
+          timeoutMs: params.timeoutMs,
+          cwd: workspaceDir,
+          input: stdinPayload,
+        });
+      } else {
+        // Run CLI directly on host
+        result = await runCommandWithTimeout([backend.command, ...args], {
+          timeoutMs: params.timeoutMs,
+          cwd: workspaceDir,
+          env,
+          input: stdinPayload,
+        });
+      }
 
       const stdout = result.stdout.trim();
       const stderr = result.stderr.trim();
@@ -264,6 +358,24 @@ export async function runCliAgent(params: {
       if (outputMode === "jsonl") {
         const parsed = parseCliJsonl(stdout, backend);
         return parsed ?? { text: stdout };
+      }
+      if (outputMode === "stream-jsonl") {
+        const parsed = parseCliStreamJsonl(stdout, backend);
+        if (parsed) {
+          // 将工具调用和结果写入会话文件（用于记忆系统索引）
+          if (params.sessionFile && (parsed.toolUses.length > 0 || parsed.toolResults.length > 0)) {
+            await writeCliEventsToSession({
+              sessionFile: params.sessionFile,
+              sessionId: parsed.sessionId ?? params.sessionId,
+              cwd: workspaceDir,
+              events: parsed,
+              provider: params.provider,
+              model: modelId,
+            });
+          }
+          return { text: parsed.text, sessionId: parsed.sessionId, usage: parsed.usage };
+        }
+        return { text: stdout };
       }
 
       const parsed = parseCliJson(stdout, backend);
@@ -324,6 +436,7 @@ export async function runClaudeCliAgent(params: {
   ownerNumbers?: string[];
   claudeSessionId?: string;
   images?: ImageContent[];
+  sandboxContext?: SandboxContext;
 }): Promise<EmbeddedPiRunResult> {
   return runCliAgent({
     sessionId: params.sessionId,
@@ -341,5 +454,6 @@ export async function runClaudeCliAgent(params: {
     ownerNumbers: params.ownerNumbers,
     cliSessionId: params.claudeSessionId,
     images: params.images,
+    sandboxContext: params.sandboxContext,
   });
 }

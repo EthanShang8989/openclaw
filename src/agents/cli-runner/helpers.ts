@@ -401,6 +401,181 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   return { text, sessionId, usage };
 }
 
+// 工具调用事件（来自 assistant 消息的 tool_use 内容）
+export type CliToolUseEvent = {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+};
+
+// 工具结果事件（来自 user 消息的 tool_result 内容）
+export type CliToolResultEvent = {
+  toolUseId: string;
+  content: string;
+  isError: boolean;
+};
+
+// stream-json 解析结果（包含事件和最终输出）
+export type CliStreamJsonlOutput = CliOutput & {
+  toolUses: CliToolUseEvent[];
+  toolResults: CliToolResultEvent[];
+};
+
+function extractToolResultText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const texts: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) {
+      continue;
+    }
+    if (typeof block.text === "string") {
+      texts.push(block.text);
+    }
+  }
+  return texts.join("");
+}
+
+/**
+ * 解析 Claude CLI stream-json 格式的 JSONL 输出。
+ * 提取文本、工具调用、工具结果和用量统计。
+ */
+export function parseCliStreamJsonl(
+  raw: string,
+  backend: CliBackendConfig,
+): CliStreamJsonlOutput | null {
+  const lines = raw
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  let sessionId: string | undefined;
+  let usage: CliUsage | undefined;
+  const toolUses: CliToolUseEvent[] = [];
+  const toolResults: CliToolResultEvent[] = [];
+  const texts: string[] = [];
+
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      continue;
+    }
+
+    // 提取 sessionId
+    if (!sessionId && typeof parsed.session_id === "string") {
+      sessionId = parsed.session_id.trim();
+    }
+    if (!sessionId) {
+      sessionId = pickSessionId(parsed, backend);
+    }
+
+    const eventType = typeof parsed.type === "string" ? parsed.type : "";
+
+    // 处理 result 事件（包含最终 usage）
+    if (eventType === "result" && isRecord(parsed.usage)) {
+      usage = toUsage(parsed.usage) ?? usage;
+      // result 事件包含最终文本
+      if (typeof parsed.result === "string" && parsed.result.trim()) {
+        // 只有在 texts 为空时才使用 result 文本（避免重复）
+        if (texts.length === 0) {
+          texts.push(parsed.result.trim());
+        }
+      }
+      continue;
+    }
+
+    // 处理 assistant 消息
+    if (eventType === "assistant") {
+      const message = isRecord(parsed.message) ? parsed.message : null;
+      if (!message) {
+        continue;
+      }
+
+      // 提取 usage（每条消息可能有增量 usage）
+      if (isRecord(message.usage)) {
+        usage = toUsage(message.usage) ?? usage;
+      }
+
+      const content = Array.isArray(message.content) ? message.content : null;
+      if (!content) {
+        continue;
+      }
+
+      for (const block of content) {
+        if (!isRecord(block)) {
+          continue;
+        }
+
+        const blockType = typeof block.type === "string" ? block.type : "";
+
+        // 提取文本
+        if (blockType === "text" && typeof block.text === "string") {
+          texts.push(block.text);
+        }
+
+        // 提取工具调用
+        if (blockType === "tool_use") {
+          const id = typeof block.id === "string" ? block.id : "";
+          const name = typeof block.name === "string" ? block.name : "";
+          const input = isRecord(block.input) ? block.input : {};
+          if (id && name) {
+            toolUses.push({ id, name, input });
+          }
+        }
+      }
+      continue;
+    }
+
+    // 处理 user 消息（包含工具结果）
+    if (eventType === "user") {
+      const message = isRecord(parsed.message) ? parsed.message : null;
+      if (!message) {
+        continue;
+      }
+
+      const content = Array.isArray(message.content) ? message.content : null;
+      if (!content) {
+        continue;
+      }
+
+      for (const block of content) {
+        if (!isRecord(block)) {
+          continue;
+        }
+
+        const blockType = typeof block.type === "string" ? block.type : "";
+
+        // 提取工具结果
+        if (blockType === "tool_result") {
+          const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+          const contentStr = extractToolResultText(block.content);
+          const isError = Boolean(block.is_error);
+          if (toolUseId) {
+            toolResults.push({ toolUseId, content: contentStr, isError });
+          }
+        }
+      }
+    }
+  }
+
+  // 合并所有文本块（最后一个 assistant 消息的文本通常是最终回复）
+  const text = texts.join("").trim();
+
+  return { text, sessionId, usage, toolUses, toolResults };
+}
+
 export function resolveSystemPromptUsage(params: {
   backend: CliBackendConfig;
   isNewSession: boolean;
