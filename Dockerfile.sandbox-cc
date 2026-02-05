@@ -1,0 +1,143 @@
+# Claude Code CLI sandbox image
+# Multi-stage build for incremental snapshots
+#
+# Stages:
+#   base     - Debian + basic tools
+#   devtools - nvm + gvm + uv (version managers)
+#   cli      - Claude Code + Codex CLI
+#
+# Build a specific stage:
+#   docker build --target devtools -t openclaw-sandbox-cc:devtools -f Dockerfile.sandbox-cc .
+
+# ============================================
+# Stage 1: Base environment
+# ============================================
+FROM debian:bookworm-slim AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base dependencies
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    jq \
+    make \
+    python3 \
+    ripgrep \
+    sudo \
+    unzip \
+    wget \
+  && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for better compatibility
+RUN useradd -m -s /bin/bash dev \
+  && echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+WORKDIR /home/dev
+
+# ============================================
+# Stage 2: Version managers (devtools)
+# ============================================
+FROM base AS devtools
+
+USER dev
+ENV HOME=/home/dev
+ENV PATH="${HOME}/.local/bin:${PATH}"
+
+# Install nvm (Node Version Manager)
+ENV NVM_DIR="${HOME}/.nvm"
+RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
+  && . "${NVM_DIR}/nvm.sh" \
+  && nvm install 22 \
+  && nvm alias default 22 \
+  && nvm cache clear
+
+# Install gvm (Go Version Manager)
+# gvm requires bash, bison, gcc, make, hexdump
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bison \
+    bsdmainutils \
+    gcc \
+    libc6-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+USER dev
+ENV GVM_ROOT="${HOME}/.gvm"
+SHELL ["/bin/bash", "-c"]
+RUN bash < <(curl -fsSL https://raw.githubusercontent.com/moovweb/gvm/master/binscripts/gvm-installer) \
+  && source "${GVM_ROOT}/scripts/gvm" \
+  && gvm install go1.22.0 -B \
+  && gvm use go1.22.0 --default
+
+# Install uv (Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Setup shell profile
+RUN cat >> "${HOME}/.bashrc" <<'EOF'
+
+# nvm
+export NVM_DIR="${HOME}/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+# gvm
+[[ -s "${HOME}/.gvm/scripts/gvm" ]] && source "${HOME}/.gvm/scripts/gvm"
+
+# uv
+export PATH="${HOME}/.local/bin:$PATH"
+
+# Proxy (set at runtime if needed)
+if [ -n "$HTTP_PROXY" ]; then
+  export http_proxy="$HTTP_PROXY"
+  export https_proxy="$HTTP_PROXY"
+fi
+EOF
+
+# ============================================
+# Stage 3: CLI tools
+# ============================================
+FROM devtools AS cli
+
+USER dev
+ENV HOME=/home/dev
+
+# Install Claude Code CLI via npm (using nvm's node)
+SHELL ["/bin/bash", "-c"]
+RUN source "${HOME}/.nvm/nvm.sh" \
+  && npm install -g @anthropic-ai/claude-code
+
+# Install Codex CLI (OpenAI)
+RUN source "${HOME}/.nvm/nvm.sh" \
+  && npm install -g @openai/codex
+
+# Create directories for credentials mount
+RUN mkdir -p "${HOME}/.claude" "${HOME}/.codex"
+
+# Create symlinks in /usr/local/bin so commands work in non-interactive shells
+# This is critical for sandbox execution which uses /bin/sh
+USER root
+RUN NODE_BIN=$(find /home/dev/.nvm/versions/node -name "bin" -type d | head -1) \
+  && ln -sf "${NODE_BIN}/node" /usr/local/bin/node \
+  && ln -sf "${NODE_BIN}/npm" /usr/local/bin/npm \
+  && ln -sf "${NODE_BIN}/npx" /usr/local/bin/npx \
+  && ln -sf "${NODE_BIN}/claude" /usr/local/bin/claude \
+  && ln -sf "${NODE_BIN}/codex" /usr/local/bin/codex
+USER dev
+
+# Verify installations (both via nvm and via symlinks)
+RUN source "${HOME}/.nvm/nvm.sh" \
+  && echo "Node (nvm): $(node --version)" \
+  && echo "Claude (nvm): $(claude --version)" \
+  && echo "Codex (nvm): $(codex --version || echo 'installed')"
+RUN echo "Node (symlink): $(/usr/local/bin/node --version)" \
+  && echo "Claude (symlink): $(/usr/local/bin/claude --version)"
+
+WORKDIR /workspace
+
+# Default command: keep container running
+CMD ["sleep", "infinity"]
