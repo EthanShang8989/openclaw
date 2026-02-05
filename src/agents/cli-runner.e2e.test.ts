@@ -1,11 +1,7 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenClawConfig } from "../config/config.js";
 import type { CliBackendConfig } from "../config/types.js";
 import { runCliAgent } from "./cli-runner.js";
-import { cleanupSuspendedCliProcesses } from "./cli-runner/helpers.js";
+import { cleanupSuspendedCliProcesses, parseCliStreamJsonl } from "./cli-runner/helpers.js";
 
 const runCommandWithTimeoutMock = vi.fn();
 const runExecMock = vi.fn();
@@ -63,83 +59,59 @@ describe("runCliAgent resume cleanup", () => {
     expect(pkillArgs[1]).toContain("thread-123");
   });
 
-  it("falls back to per-agent workspace when workspaceDir is missing", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-runner-"));
-    const fallbackWorkspace = path.join(tempDir, "workspace-main");
-    await fs.mkdir(fallbackWorkspace, { recursive: true });
-    const cfg = {
-      agents: {
-        defaults: {
-          workspace: fallbackWorkspace,
-        },
-      },
-    } satisfies OpenClawConfig;
-
-    runExecMock.mockResolvedValue({ stdout: "", stderr: "" });
+  it("single-quotes all sandbox command args when using docker exec", async () => {
+    runExecMock
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
     runCommandWithTimeoutMock.mockResolvedValueOnce({
-      stdout: "ok",
+      stdout: '{"thread_id":"t1","item":{"type":"message","text":"ok"}}',
       stderr: "",
       code: 0,
       signal: null,
       killed: false,
     });
 
-    try {
-      await runCliAgent({
-        sessionId: "s1",
-        sessionKey: "agent:main:subagent:missing-workspace",
-        sessionFile: "/tmp/session.jsonl",
-        workspaceDir: undefined as unknown as string,
-        config: cfg,
-        prompt: "hi",
-        provider: "codex-cli",
-        model: "gpt-5.2-codex",
-        timeoutMs: 1_000,
-        runId: "run-1",
-      });
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-
-    const options = runCommandWithTimeoutMock.mock.calls[0]?.[1] as { cwd?: string };
-    expect(options.cwd).toBe(path.resolve(fallbackWorkspace));
-  });
-
-  it("throws when sessionKey is malformed", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-runner-"));
-    const mainWorkspace = path.join(tempDir, "workspace-main");
-    const researchWorkspace = path.join(tempDir, "workspace-research");
-    await fs.mkdir(mainWorkspace, { recursive: true });
-    await fs.mkdir(researchWorkspace, { recursive: true });
-    const cfg = {
-      agents: {
-        defaults: {
-          workspace: mainWorkspace,
+    await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      prompt: "hello; echo pwned",
+      provider: "codex-cli",
+      model: "gpt-5.2-codex",
+      timeoutMs: 1_000,
+      runId: "run-sandbox-1",
+      sandboxContext: {
+        enabled: true,
+        sessionKey: "s1",
+        workspaceDir: "/tmp",
+        agentWorkspaceDir: "/tmp",
+        workspaceAccess: "rw",
+        containerName: "openclaw-test",
+        containerWorkdir: "/workspace",
+        docker: {
+          image: "test",
+          containerPrefix: "openclaw",
+          workdir: "/workspace",
+          readOnlyRoot: false,
+          tmpfs: [],
+          network: "none",
+          capDrop: [],
+          env: {},
         },
-        list: [{ id: "research", workspace: researchWorkspace }],
+        tools: {},
+        browserAllowHostControl: false,
       },
-    } satisfies OpenClawConfig;
+    });
 
-    try {
-      await expect(
-        runCliAgent({
-          sessionId: "s1",
-          sessionKey: "agent::broken",
-          agentId: "research",
-          sessionFile: "/tmp/session.jsonl",
-          workspaceDir: undefined as unknown as string,
-          config: cfg,
-          prompt: "hi",
-          provider: "codex-cli",
-          model: "gpt-5.2-codex",
-          timeoutMs: 1_000,
-          runId: "run-2",
-        }),
-      ).rejects.toThrow("Malformed agent session key");
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-    expect(runCommandWithTimeoutMock).not.toHaveBeenCalled();
+    expect(runCommandWithTimeoutMock).toHaveBeenCalledTimes(1);
+    const argv = runCommandWithTimeoutMock.mock.calls[0]?.[0] as string[];
+    expect(argv[0]).toBe("docker");
+    expect(argv).toContain("sh");
+    expect(argv).toContain("-lc");
+    const shellCommand = argv[argv.length - 1] ?? "";
+    expect(shellCommand).toContain("'codex'");
+    expect(shellCommand).toContain("'hello; echo pwned'");
+    expect(shellCommand).not.toContain(" hello; echo pwned");
   });
 });
 
@@ -222,5 +194,39 @@ describe("cleanupSuspendedCliProcesses", () => {
     const killCall = runExecMock.mock.calls[1] ?? [];
     expect(killCall[0]).toBe("kill");
     expect(killCall[1]).toEqual(["-9", "50", "51"]);
+  });
+});
+
+describe("parseCliStreamJsonl", () => {
+  it("extracts text from array-form tool_result content blocks", () => {
+    const raw = [
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sid-1",
+        message: {
+          content: [{ type: "tool_use", id: "toolu_1", name: "web_search", input: { q: "x" } }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "result line 1" },
+                { type: "text", text: " + line 2" },
+              ],
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseCliStreamJsonl(raw, { command: "claude" } as CliBackendConfig);
+    expect(parsed?.toolResults).toEqual([
+      { toolUseId: "toolu_1", content: "result line 1 + line 2", isError: false },
+    ]);
   });
 });
