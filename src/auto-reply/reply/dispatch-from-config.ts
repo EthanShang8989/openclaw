@@ -3,6 +3,15 @@ import type { FinalizedMsgContext } from "../templating.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import {
+  clearPendingInteraction,
+  getPendingInteraction,
+  parseUserAnswer,
+} from "../../agents/cli-runner/interaction-manager.js";
+import {
+  formatCancelConfirmation,
+  formatResumeMessage,
+} from "../../agents/cli-runner/interaction-format.js";
 import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
@@ -284,6 +293,81 @@ export async function dispatchReplyFromConfig(params: {
       recordProcessed("completed", { reason: "fast_abort" });
       markIdle("message_completed");
       return { queuedFinal, counts };
+    }
+
+    // 检测是否有待回答的 CLI 交互
+    const sessionKeyForInteraction = ctx.SessionKey;
+    const pendingInteraction = sessionKeyForInteraction
+      ? getPendingInteraction(sessionKeyForInteraction)
+      : undefined;
+    if (pendingInteraction && sessionKeyForInteraction) {
+      const userMessage =
+        typeof ctx.BodyForCommands === "string"
+          ? ctx.BodyForCommands
+          : typeof ctx.RawBody === "string"
+            ? ctx.RawBody
+            : typeof ctx.Body === "string"
+              ? ctx.Body
+              : "";
+      const trimmedMessage = userMessage.trim();
+
+      // 检测取消命令
+      if (trimmedMessage.toLowerCase() === "/cancel") {
+        clearPendingInteraction(sessionKeyForInteraction);
+        const payload = { text: formatCancelConfirmation() } satisfies ReplyPayload;
+        let queuedFinal = false;
+        let routedFinalCount = 0;
+        if (shouldRouteToOriginating && originatingChannel && originatingTo) {
+          const result = await routeReply({
+            payload,
+            channel: originatingChannel,
+            to: originatingTo,
+            sessionKey: ctx.SessionKey,
+            accountId: ctx.AccountId,
+            threadId: ctx.MessageThreadId,
+            cfg,
+          });
+          queuedFinal = result.ok;
+          if (result.ok) {
+            routedFinalCount += 1;
+          }
+        } else {
+          queuedFinal = dispatcher.sendFinalReply(payload);
+        }
+        await dispatcher.waitForIdle();
+        const counts = dispatcher.getQueuedCounts();
+        counts.final += routedFinalCount;
+        recordProcessed("completed", { reason: "cli_interaction_cancelled" });
+        markIdle("message_completed");
+        logVerbose(`CLI interaction cancelled by user: sessionKey=${sessionKeyForInteraction}`);
+        return { queuedFinal, counts };
+      }
+
+      // 用户回答了问题 - 清除交互状态并继续处理
+      // 解析用户回答并传递给后续处理
+      const userAnswer = parseUserAnswer(
+        trimmedMessage,
+        pendingInteraction.options,
+        pendingInteraction.multiSelect,
+      );
+      clearPendingInteraction(sessionKeyForInteraction);
+      logVerbose(
+        `CLI interaction answered: sessionKey=${sessionKeyForInteraction} ` +
+          `type=${pendingInteraction.type} answer=${userAnswer.substring(0, 50)}`,
+      );
+
+      // 发送 "正在处理" 的提示（可选）
+      // 注意：这里不发送中间消息，直接让 CLI resume 处理
+      // 用户回答会通过 replyOptions.cliInteractionAnswer 传递给 getReplyFromConfig
+
+      // 将交互信息传递给后续处理
+      params.replyOptions = {
+        ...params.replyOptions,
+        cliInteractionAnswer: {
+          pending: pendingInteraction,
+          answer: userAnswer,
+        },
+      };
     }
 
     // Track accumulated block text for TTS generation after streaming completes.

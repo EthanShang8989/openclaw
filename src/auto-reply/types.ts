@@ -1,4 +1,5 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
+import type { PendingInteraction } from "../agents/cli-runner/interaction-manager.js";
 import type { TypingController } from "./reply/typing.js";
 
 export type BlockReplyContext = {
@@ -11,6 +12,17 @@ export type ModelSelectedContext = {
   provider: string;
   model: string;
   thinkLevel: string | undefined;
+};
+
+/**
+ * CLI 交互回答信息
+ * 当用户回答了 AskUserQuestion 等交互问题时传递
+ */
+export type CliInteractionAnswer = {
+  /** 原始的待交互状态 */
+  pending: PendingInteraction;
+  /** 用户的回答 */
+  answer: string;
 };
 
 export type GetReplyOptions = {
@@ -39,6 +51,8 @@ export type GetReplyOptions = {
   skillFilter?: string[];
   /** Mutable ref to track if a reply was sent (for Slack "first" threading mode). */
   hasRepliedRef?: { value: boolean };
+  /** CLI 交互回答（当用户回答了 AskUserQuestion 等问题时） */
+  cliInteractionAnswer?: CliInteractionAnswer;
 };
 
 export type ReplyPayload = {

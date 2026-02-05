@@ -3,6 +3,7 @@ import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
 import type { SandboxContext } from "./sandbox/types.js";
+import type { DetectedInteraction } from "./cli-runner/interaction-manager.js";
 import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
@@ -93,6 +94,24 @@ function buildCliSandboxCommand(params: {
   });
 }
 
+/**
+ * CLI 交互恢复时传入的工具结果
+ */
+export type CliToolResultInput = {
+  /** 工具调用 ID（对应 AskUserQuestion 的 tool_use_id） */
+  toolCallId: string;
+  /** 用户回答内容 */
+  result: string;
+};
+
+/**
+ * CLI Agent 运行结果（扩展自 EmbeddedPiRunResult）
+ */
+export type CliAgentRunResult = EmbeddedPiRunResult & {
+  /** 检测到的待交互请求（AskUserQuestion 等） */
+  pendingInteraction?: DetectedInteraction;
+};
+
 export async function runCliAgent(params: {
   sessionId: string;
   sessionKey?: string;
@@ -111,7 +130,9 @@ export async function runCliAgent(params: {
   cliSessionId?: string;
   images?: ImageContent[];
   sandboxContext?: SandboxContext;
-}): Promise<EmbeddedPiRunResult> {
+  /** 交互恢复时传入的工具结果（用于回答 AskUserQuestion） */
+  toolResult?: CliToolResultInput;
+}): Promise<CliAgentRunResult> {
   const started = Date.now();
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   const workspaceDir = resolvedWorkspace;
@@ -167,6 +188,7 @@ export async function runCliAgent(params: {
     contextFiles,
     modelDisplay,
     agentId: sessionAgentId,
+    sessionKey: params.sessionKey,
   });
 
   const { sessionId: cliSessionIdToSend, isNew } = resolveSessionIdToSend({
@@ -206,7 +228,23 @@ export async function runCliAgent(params: {
     backend,
     prompt,
   });
-  const stdinPayload = stdin ?? "";
+
+  // 构建 stdin 输入：如果有 toolResult，构造 tool_result 消息
+  let stdinPayload = stdin ?? "";
+  if (params.toolResult && useResume) {
+    // 使用 stream-json 格式传入 tool_result
+    // Claude CLI 期望 stdin 是 JSONL 格式的用户消息
+    const toolResultMessage = {
+      type: "tool_result",
+      tool_use_id: params.toolResult.toolCallId,
+      content: params.toolResult.result,
+    };
+    stdinPayload = JSON.stringify(toolResultMessage);
+    log.info(
+      `cli resume with tool result: toolCallId=${params.toolResult.toolCallId} ` +
+        `resultChars=${params.toolResult.result.length}`,
+    );
+  }
   const baseArgs = useResume ? (backend.resumeArgs ?? backend.args ?? []) : (backend.args ?? []);
   const resolvedArgs = useResume
     ? baseArgs.map((entry) => entry.replaceAll("{sessionId}", cliSessionIdToSend ?? ""))
@@ -373,7 +411,12 @@ export async function runCliAgent(params: {
               model: modelId,
             });
           }
-          return { text: parsed.text, sessionId: parsed.sessionId, usage: parsed.usage };
+          return {
+            text: parsed.text,
+            sessionId: parsed.sessionId,
+            usage: parsed.usage,
+            pendingInteraction: parsed.pendingInteraction,
+          };
         }
         return { text: stdout };
       }
@@ -384,6 +427,10 @@ export async function runCliAgent(params: {
 
     const text = output.text?.trim();
     const payloads = text ? [{ text }] : undefined;
+
+    // 提取 pendingInteraction（仅 stream-jsonl 输出模式有此字段）
+    const pendingInteraction =
+      "pendingInteraction" in output ? output.pendingInteraction : undefined;
 
     return {
       payloads,
@@ -396,6 +443,7 @@ export async function runCliAgent(params: {
           usage: output.usage,
         },
       },
+      pendingInteraction,
     };
   } catch (err) {
     if (err instanceof FailoverError) {
@@ -437,7 +485,8 @@ export async function runClaudeCliAgent(params: {
   claudeSessionId?: string;
   images?: ImageContent[];
   sandboxContext?: SandboxContext;
-}): Promise<EmbeddedPiRunResult> {
+  toolResult?: CliToolResultInput;
+}): Promise<CliAgentRunResult> {
   return runCliAgent({
     sessionId: params.sessionId,
     sessionKey: params.sessionKey,
@@ -455,5 +504,6 @@ export async function runClaudeCliAgent(params: {
     cliSessionId: params.claudeSessionId,
     images: params.images,
     sandboxContext: params.sandboxContext,
+    toolResult: params.toolResult,
   });
 }

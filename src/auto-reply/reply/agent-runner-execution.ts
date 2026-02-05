@@ -6,8 +6,14 @@ import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
 import type { TypingSignaler } from "./typing-mode.js";
 import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
-import { runCliAgent } from "../../agents/cli-runner.js";
-import { getCliSessionId } from "../../agents/cli-session.js";
+import { runCliAgent, type CliAgentRunResult } from "../../agents/cli-runner.js";
+import {
+  createPendingInteraction,
+  setPendingInteraction,
+  type DetectedInteraction,
+} from "../../agents/cli-runner/interaction-manager.js";
+import { formatInteractionQuestion } from "../../agents/cli-runner/interaction-format.js";
+import { getCliSessionId, setCliSessionId } from "../../agents/cli-session.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { resolveSandboxContext } from "../../agents/sandbox.js";
@@ -49,6 +55,8 @@ export type AgentRunLoopResult =
       autoCompactionCompleted: boolean;
       /** Payload keys sent directly (not via pipeline) during tool flush. */
       directlySentBlockKeys?: Set<string>;
+      /** CLI 交互请求（AskUserQuestion 等）已保存，等待用户回复 */
+      pendingInteraction?: DetectedInteraction;
     }
   | { kind: "final"; payload: ReplyPayload };
 
@@ -172,7 +180,12 @@ export async function runAgentTurnWithFallback(params: {
                 startedAt,
               },
             });
-            const cliSessionId = getCliSessionId(params.getActiveSessionEntry(), provider);
+            // 检测是否是 CLI 交互恢复（用户回答了问题）
+            const cliInteractionAnswer = params.opts?.cliInteractionAnswer;
+            // 如果是交互恢复，使用交互中保存的 cliSessionId；否则从会话中获取
+            const cliSessionId = cliInteractionAnswer
+              ? cliInteractionAnswer.pending.cliSessionId
+              : getCliSessionId(params.getActiveSessionEntry(), provider);
             return (async () => {
               let lifecycleTerminalEmitted = false;
               try {
@@ -182,6 +195,21 @@ export async function runAgentTurnWithFallback(params: {
                   sessionKey: params.sessionKey,
                   workspaceDir: params.followupRun.run.workspaceDir,
                 });
+
+                // 构造 toolResult（如果是交互恢复）
+                const toolResult = cliInteractionAnswer
+                  ? {
+                      toolCallId: cliInteractionAnswer.pending.toolCallId,
+                      result: cliInteractionAnswer.answer,
+                    }
+                  : undefined;
+
+                if (toolResult) {
+                  logVerbose(
+                    `CLI interaction resume: provider=${provider} ` +
+                      `cliSessionId=${cliSessionId} toolCallId=${toolResult.toolCallId}`,
+                  );
+                }
 
                 const result = await runCliAgent({
                   sessionId: params.followupRun.run.sessionId,
@@ -200,12 +228,47 @@ export async function runAgentTurnWithFallback(params: {
                   cliSessionId,
                   images: params.opts?.images,
                   sandboxContext: sandboxContext ?? undefined,
+                  toolResult,
                 });
+
+                // 检测并处理 CLI 交互请求
+                let finalResult: CliAgentRunResult = result;
+                if (result.pendingInteraction && params.sessionKey) {
+                  const cliSessionIdFromResult = result.meta?.agentMeta?.sessionId;
+                  if (cliSessionIdFromResult) {
+                    // 保存交互状态
+                    const pending = createPendingInteraction({
+                      cliSessionId: cliSessionIdFromResult,
+                      sessionKey: params.sessionKey,
+                      detected: result.pendingInteraction,
+                      provider,
+                    });
+                    setPendingInteraction(pending);
+
+                    // 更新会话的 CLI session ID（用于后续 resume）
+                    const sessionEntry = params.getActiveSessionEntry();
+                    if (sessionEntry) {
+                      setCliSessionId(sessionEntry, provider, cliSessionIdFromResult);
+                    }
+
+                    // 将响应替换为格式化的问题消息
+                    const questionText = formatInteractionQuestion(pending);
+                    finalResult = {
+                      ...result,
+                      payloads: [{ text: questionText }],
+                    };
+
+                    logVerbose(
+                      `CLI interaction detected: type=${result.pendingInteraction.type} ` +
+                        `toolCallId=${result.pendingInteraction.toolCallId}`,
+                    );
+                  }
+                }
 
                 // CLI backends don't emit streaming assistant events, so we need to
                 // emit one with the final text so server-chat can populate its buffer
                 // and send the response to TUI/WebSocket clients.
-                const cliText = result.payloads?.[0]?.text?.trim();
+                const cliText = finalResult.payloads?.[0]?.text?.trim();
                 if (cliText) {
                   emitAgentEvent({
                     runId,
@@ -225,7 +288,7 @@ export async function runAgentTurnWithFallback(params: {
                 });
                 lifecycleTerminalEmitted = true;
 
-                return result;
+                return finalResult;
               } catch (err) {
                 emitAgentEvent({
                   runId,
@@ -599,6 +662,9 @@ export async function runAgentTurnWithFallback(params: {
     }
   }
 
+  // 提取 CLI 交互信息（如果存在）
+  const pendingInteraction = (runResult as CliAgentRunResult).pendingInteraction;
+
   return {
     kind: "success",
     runResult,
@@ -607,5 +673,6 @@ export async function runAgentTurnWithFallback(params: {
     didLogHeartbeatStrip,
     autoCompactionCompleted,
     directlySentBlockKeys: directlySentBlockKeys.size > 0 ? directlySentBlockKeys : undefined,
+    pendingInteraction,
   };
 }

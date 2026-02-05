@@ -3,6 +3,7 @@ import { callGateway } from "../gateway/call.js";
 import { onAgentEvent } from "../infra/agent-events.js";
 import { type DeliveryContext, normalizeDeliveryContext } from "../utils/delivery-context.js";
 import { runSubagentAnnounceFlow, type SubagentRunOutcome } from "./subagent-announce.js";
+import { subagentManager } from "./subagent-manager.js";
 import {
   loadSubagentRegistryFromDisk,
   saveSubagentRegistryToDisk,
@@ -218,6 +219,13 @@ function ensureListener() {
     }
     persistSubagentRuns();
 
+    // 同步完成状态到 subagentManager
+    subagentManager.markCompleted({
+      runId: evt.runId,
+      outcome: entry.outcome,
+      endedAt,
+    });
+
     if (!beginSubagentCleanup(evt.runId)) {
       return;
     }
@@ -288,6 +296,8 @@ export function registerSubagentRun(params: {
   cleanup: "delete" | "keep";
   label?: string;
   runTimeoutSeconds?: number;
+  model?: string;
+  reserveId?: string; // 从 subagentManager.reserveSlot 获得的预留 ID
 }) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -309,6 +319,21 @@ export function registerSubagentRun(params: {
     archiveAtMs,
     cleanupHandled: false,
   });
+
+  // 同步到 subagentManager 以支持状态查询（会自动释放预留槽位）
+  subagentManager.register(
+    {
+      runId: params.runId,
+      childSessionKey: params.childSessionKey,
+      requesterSessionKey: params.requesterSessionKey,
+      task: params.task,
+      label: params.label,
+      startedAt: now,
+      model: params.model,
+    },
+    params.reserveId,
+  );
+
   ensureListener();
   persistSubagentRuns();
   if (archiveAfterMs) {
@@ -335,13 +360,28 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       },
       timeoutMs: timeoutMs + 10_000,
     });
-    if (wait?.status !== "ok" && wait?.status !== "error") {
-      return;
-    }
     const entry = subagentRuns.get(runId);
     if (!entry) {
+      // 如果没有 entry，也需要清理 subagentManager 中可能存在的状态
+      if (wait?.status === "timeout" || (wait?.status !== "ok" && wait?.status !== "error")) {
+        subagentManager.markCompleted({
+          runId,
+          outcome: { status: "timeout" },
+          endedAt: Date.now(),
+        });
+      }
       return;
     }
+
+    // 处理非终止状态（timeout/unknown）
+    // 注意：agent.wait timeout 只表示等待调用超时，subagent 可能仍在运行
+    // 不要标记为完成，保留运行状态等待真正完成
+    if (wait?.status !== "ok" && wait?.status !== "error") {
+      // 只记录日志，不清理状态
+      // subagent 会在真正完成时通过 announce 机制通知
+      return;
+    }
+
     let mutated = false;
     if (typeof wait.startedAt === "number") {
       entry.startedAt = wait.startedAt;
@@ -362,6 +402,14 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
     if (mutated) {
       persistSubagentRuns();
     }
+
+    // 同步完成状态到 subagentManager
+    subagentManager.markCompleted({
+      runId,
+      outcome: entry.outcome,
+      endedAt: entry.endedAt,
+    });
+
     if (!beginSubagentCleanup(runId)) {
       return;
     }

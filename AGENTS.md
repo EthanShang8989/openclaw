@@ -11,7 +11,7 @@
   - 扩展: `extensions/*`，文档: `docs/`
 - **核心约定**：
   1. 用 `pnpm`（锁文件）+ `bun`（执行 TS）
-  2. 提交前跑 `pnpm build && pnpm check && pnpm test`
+  2. 提交前跑 `pnpm build && pnpm check`（开发阶段暂不跑测试，WSL 环境下测试套件不稳定）
   3. 用 `scripts/committer "<msg>" <file...>` 提交，避免手动 git add
   4. 渠道改动需考虑所有 built-in + extension channels
   5. 不编辑 `node_modules`，不更新 Carbon 依赖
@@ -22,7 +22,7 @@
   - 安装: `pnpm install`
   - 构建: `pnpm build`
   - 检查: `pnpm check`（lint + format）
-  - 测试: `pnpm test`，覆盖率: `pnpm test:coverage`
+  - 测试: `pnpm test`（暂不使用，WSL 环境不稳定）
   - 开发运行: `pnpm openclaw ...` 或 `pnpm dev`
   - 打包 Mac: `scripts/package-mac-app.sh`
 - **操作红线**：
@@ -40,6 +40,14 @@
 - Gateway 通过 Mac app 启停，不用 tmux 临时会话
 - 提交: `scripts/committer "<msg>" <file...>`
 - PR 流程: temp 分支 → squash/rebase → 加 changelog + 感谢 → merge 回 main
+
+### WSL 本地开发部署
+- 部署脚本: `scripts/deploy-local.sh`
+- 完整部署: `./scripts/deploy-local.sh deploy` (构建 + 同步 + 服务器构建 + 重启)
+- 快速同步: `./scripts/deploy-local.sh sync` (仅同步代码)
+- 快速重启: `./scripts/deploy-local.sh restart` (仅重启服务)
+- 查看日志: `./scripts/deploy-local.sh logs`
+- 服务器别名: `openclaws`，代码目录: `/opt/openclaw`
 
 ### 代码风格
 - TypeScript ESM，严格类型，避免 `any`

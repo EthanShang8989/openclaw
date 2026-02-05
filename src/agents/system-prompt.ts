@@ -4,6 +4,7 @@ import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
+import { getSubagentStatusForPrompt } from "./subagent-manager.js";
 
 /**
  * Controls which hardcoded sections are included in the system prompt.
@@ -214,6 +215,8 @@ export function buildAgentSystemPrompt(params: {
     channel: string;
   };
   memoryCitationsMode?: MemoryCitationsMode;
+  /** Session key for injecting subagent status. */
+  sessionKey?: string;
 }) {
   const coreToolSummaries: Record<string, string> = {
     read: "Read file contents",
@@ -596,6 +599,14 @@ export function buildAgentSystemPrompt(params: {
       'If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.',
       "",
     );
+  }
+
+  // 注入 subagent 状态（仅对主 agent）
+  if (!isMinimal && params.sessionKey) {
+    const subagentStatus = getSubagentStatusForPrompt(params.sessionKey);
+    if (subagentStatus) {
+      lines.push(subagentStatus, "");
+    }
   }
 
   lines.push(

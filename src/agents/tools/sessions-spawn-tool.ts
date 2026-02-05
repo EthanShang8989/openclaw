@@ -15,6 +15,7 @@ import { resolveAgentConfig } from "../agent-scope.js";
 import { AGENT_LANE_SUBAGENT } from "../lanes.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { buildSubagentSystemPrompt } from "../subagent-announce.js";
+import { reserveSubagentSlot, releaseSubagentSlot } from "../subagent-manager.js";
 import { registerSubagentRun } from "../subagent-registry.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
@@ -125,6 +126,7 @@ export function createSessionsSpawnTool(opts?: {
           error: "sessions_spawn is not allowed from sub-agent sessions",
         });
       }
+
       const requesterInternalKey = requesterSessionKey
         ? resolveInternalSessionKey({
             key: requesterSessionKey,
@@ -137,6 +139,19 @@ export function createSessionsSpawnTool(opts?: {
         alias,
         mainKey,
       });
+
+      // 原子预留槽位（防止并发超限）
+      const reservation = reserveSubagentSlot(requesterInternalKey);
+      if (!reservation.allowed) {
+        return jsonResult({
+          status: "rejected",
+          error: reservation.reason,
+        });
+      }
+      const reserveId = reservation.reserveId!;
+
+      // 后续出错时释放预留槽位
+      const releaseReservation = () => releaseSubagentSlot(reserveId);
 
       const requesterAgentId = normalizeAgentId(
         opts?.requesterAgentIdOverride ?? parseAgentSessionKey(requesterInternalKey)?.agentId,
@@ -154,6 +169,7 @@ export function createSessionsSpawnTool(opts?: {
             .map((value) => normalizeAgentId(value).toLowerCase()),
         );
         if (!allowAny && !allowSet.has(normalizedTargetId)) {
+          releaseReservation();
           const allowedText = allowAny
             ? "*"
             : allowSet.size > 0
@@ -182,6 +198,7 @@ export function createSessionsSpawnTool(opts?: {
       if (thinkingCandidateRaw) {
         const normalized = normalizeThinkLevel(thinkingCandidateRaw);
         if (!normalized) {
+          releaseReservation();
           const { provider, model } = splitModelRef(resolvedModel);
           const hint = formatThinkingLevels(provider, model);
           return jsonResult({
@@ -205,6 +222,7 @@ export function createSessionsSpawnTool(opts?: {
           const recoverable =
             messageText.includes("invalid model") || messageText.includes("model not allowed");
           if (!recoverable) {
+            releaseReservation();
             return jsonResult({
               status: "error",
               error: messageText,
@@ -249,6 +267,7 @@ export function createSessionsSpawnTool(opts?: {
           childRunId = response.runId;
         }
       } catch (err) {
+        releaseReservation();
         const messageText =
           err instanceof Error ? err.message : typeof err === "string" ? err : "error";
         return jsonResult({
@@ -259,6 +278,7 @@ export function createSessionsSpawnTool(opts?: {
         });
       }
 
+      // 注册成功，将预留槽位转为正式运行状态
       registerSubagentRun({
         runId: childRunId,
         childSessionKey,
@@ -269,6 +289,8 @@ export function createSessionsSpawnTool(opts?: {
         cleanup,
         label: label || undefined,
         runTimeoutSeconds,
+        model: resolvedModel,
+        reserveId, // 传入预留 ID，注册时会自动释放
       });
 
       return jsonResult({
