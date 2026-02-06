@@ -34,6 +34,7 @@ const SessionsSpawnToolSchema = Type.Object({
   // Back-compat alias. Prefer runTimeoutSeconds.
   timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
+  planMode: Type.Optional(Type.Boolean()),
 });
 
 function splitModelRef(ref?: string) {
@@ -92,8 +93,13 @@ export function createSessionsSpawnTool(opts?: {
       const requestedAgentId = readStringParam(params, "agentId");
       const modelOverride = readStringParam(params, "model");
       const thinkingOverrideRaw = readStringParam(params, "thinking");
-      const cleanup =
-        params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+      const planMode = params.planMode === true;
+      // planMode 时强制 cleanup = "keep"（需要保留 session 以便后续 sessions_send 审批）
+      const cleanup = planMode
+        ? "keep"
+        : params.cleanup === "keep" || params.cleanup === "delete"
+          ? params.cleanup
+          : "keep";
       const requesterOrigin = normalizeDeliveryContext({
         channel: opts?.agentChannel,
         accountId: opts?.agentAccountId,
@@ -238,6 +244,7 @@ export function createSessionsSpawnTool(opts?: {
         childSessionKey,
         label: label || undefined,
         task,
+        planMode,
       });
 
       const childIdem = crypto.randomUUID();
@@ -291,6 +298,7 @@ export function createSessionsSpawnTool(opts?: {
         runTimeoutSeconds,
         model: resolvedModel,
         reserveId, // 传入预留 ID，注册时会自动释放
+        planMode,
       });
 
       return jsonResult({

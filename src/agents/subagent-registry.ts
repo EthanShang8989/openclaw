@@ -26,6 +26,7 @@ export type SubagentRunRecord = {
   archiveAtMs?: number;
   cleanupCompletedAt?: number;
   cleanupHandled?: boolean;
+  planMode?: boolean;
 };
 
 const subagentRuns = new Map<string, SubagentRunRecord>();
@@ -76,6 +77,7 @@ function resumeSubagentRun(runId: string) {
       endedAt: entry.endedAt,
       label: entry.label,
       outcome: entry.outcome,
+      planMode: entry.planMode,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(runId, entry.cleanup, didAnnounce);
     });
@@ -244,6 +246,7 @@ function ensureListener() {
       endedAt: entry.endedAt,
       label: entry.label,
       outcome: entry.outcome,
+      planMode: entry.planMode,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(evt.runId, entry.cleanup, didAnnounce);
     });
@@ -298,6 +301,7 @@ export function registerSubagentRun(params: {
   runTimeoutSeconds?: number;
   model?: string;
   reserveId?: string; // 从 subagentManager.reserveSlot 获得的预留 ID
+  planMode?: boolean;
 }) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -318,6 +322,7 @@ export function registerSubagentRun(params: {
     startedAt: now,
     archiveAtMs,
     cleanupHandled: false,
+    planMode: params.planMode || undefined,
   });
 
   // 同步到 subagentManager 以支持状态查询（会自动释放预留槽位）
@@ -330,6 +335,7 @@ export function registerSubagentRun(params: {
       label: params.label,
       startedAt: now,
       model: params.model,
+      planMode: params.planMode,
     },
     params.reserveId,
   );
@@ -428,6 +434,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       endedAt: entry.endedAt,
       label: entry.label,
       outcome: entry.outcome,
+      planMode: entry.planMode,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(runId, entry.cleanup, didAnnounce);
     });

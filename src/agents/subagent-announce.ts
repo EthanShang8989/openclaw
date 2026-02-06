@@ -294,6 +294,7 @@ export function buildSubagentSystemPrompt(params: {
   childSessionKey: string;
   label?: string;
   task?: string;
+  planMode?: boolean;
 }) {
   const taskText =
     typeof params.task === "string" && params.task.trim()
@@ -316,10 +317,11 @@ export function buildSubagentSystemPrompt(params: {
     "4. **Be ephemeral** - You may be terminated after task completion. That's fine.",
     "",
     "## Output Format",
-    "When complete, your final response should include:",
-    "- What you accomplished or found",
-    "- Any relevant details the main agent should know",
-    "- Keep it concise but informative",
+    "When complete, structure your output as:",
+    "1. Detailed findings (full analysis, code, etc.)",
+    "2. ---",
+    "3. SUMMARY: A 1-2 sentence summary of what you found/did",
+    "The main agent will see your SUMMARY first and use sessions_history to read details if needed.",
     "",
     "## What You DON'T Do",
     "- NO user conversations (that's main agent's job)",
@@ -328,16 +330,57 @@ export function buildSubagentSystemPrompt(params: {
     "- NO pretending to be the main agent",
     "- Only use the `message` tool when explicitly instructed to contact a specific external recipient; otherwise return plain text and let the main agent deliver it",
     "",
+  ];
+
+  // Plan Mode 注入
+  if (params.planMode) {
+    lines.push(
+      "## PLAN MODE",
+      "You are in PLANNING mode:",
+      "1. Research the codebase, understand requirements",
+      "2. Write a detailed implementation plan",
+      "3. DO NOT implement anything (no file edits/writes)",
+      "4. Structure output: detailed plan → --- → SUMMARY: 1-2 sentence summary",
+      "5. After approval, you'll continue in this session to implement",
+      "",
+    );
+  }
+
+  lines.push(
     "## Session Context",
-    params.label ? `- Label: ${params.label}` : undefined,
-    params.requesterSessionKey ? `- Requester session: ${params.requesterSessionKey}.` : undefined,
-    params.requesterOrigin?.channel
-      ? `- Requester channel: ${params.requesterOrigin.channel}.`
-      : undefined,
-    `- Your session: ${params.childSessionKey}.`,
+    ...[
+      params.label ? `- Label: ${params.label}` : undefined,
+      params.requesterSessionKey
+        ? `- Requester session: ${params.requesterSessionKey}.`
+        : undefined,
+      params.requesterOrigin?.channel
+        ? `- Requester channel: ${params.requesterOrigin.channel}.`
+        : undefined,
+      `- Your session: ${params.childSessionKey}.`,
+    ].filter((line): line is string => line !== undefined),
     "",
-  ].filter((line): line is string => line !== undefined);
+  );
   return lines.join("\n");
+}
+
+/**
+ * 从 subagent 回复中提取摘要。
+ * 优先查找 "SUMMARY:" 标记，回退为取最后 maxLen 个字符。
+ */
+function extractSummary(reply: string | undefined, maxLen: number): string {
+  if (!reply) {
+    return "(no output)";
+  }
+  // 优先查找 "SUMMARY:" 标记
+  const marker = reply.lastIndexOf("SUMMARY:");
+  if (marker >= 0) {
+    return reply
+      .slice(marker + 8)
+      .trim()
+      .slice(0, maxLen);
+  }
+  // 回退：取最后 maxLen 字符
+  return reply.length > maxLen ? reply.slice(-maxLen).trim() : reply.trim();
 }
 
 export type SubagentRunOutcome = {
@@ -360,6 +403,7 @@ export async function runSubagentAnnounceFlow(params: {
   endedAt?: number;
   label?: string;
   outcome?: SubagentRunOutcome;
+  planMode?: boolean;
 }): Promise<boolean> {
   let didAnnounce = false;
   try {
@@ -432,20 +476,49 @@ export async function runSubagentAnnounceFlow(params: {
             ? `failed: ${outcome.error || "unknown error"}`
             : "finished with unknown status";
 
-    // Build instructional message for main agent
+    // Build compact trigger message for main agent
+    // 完整输出留在 subagent 的 session transcript 中，这里只注入精简消息
     const taskLabel = params.label || params.task || "background task";
-    const triggerMessage = [
-      `A background task "${taskLabel}" just ${statusLabel}.`,
-      "",
-      "Findings:",
-      reply || "(no output)",
-      "",
-      statsLine,
-      "",
-      "Summarize this naturally for the user. Keep it brief (1-2 sentences). Flow it into the conversation naturally.",
-      "Do not mention technical details like tokens, stats, or that this was a background task.",
-      "You can respond with NO_REPLY if no announcement is needed (e.g., internal task with no user-facing result).",
-    ].join("\n");
+    const summaryText = extractSummary(reply, 200);
+
+    let triggerMessage: string;
+    if (params.planMode && outcome.status === "ok") {
+      // Plan Mode 成功完成时发送审批消息
+      triggerMessage = [
+        `[PLAN READY] "${taskLabel}" plan completed`,
+        `session: ${params.childSessionKey}`,
+        "",
+        `To approve: sessions_send sessionKey="${params.childSessionKey}" message="APPROVED: proceed"`,
+        `To reject:  sessions_send sessionKey="${params.childSessionKey}" message="REJECTED: <reason>"`,
+        "",
+        `Summary: ${summaryText}`,
+        "",
+        "Need full plan? Use sessions_history to read the subagent's output.",
+      ].join("\n");
+    } else if (params.planMode) {
+      // Plan Mode 失败时，不发送审批指令
+      triggerMessage = [
+        `[PLAN FAILED] "${taskLabel}" ${statusLabel}`,
+        `session: ${params.childSessionKey}`,
+        "",
+        `Summary: ${summaryText}`,
+        "",
+        "The plan subagent did not complete successfully. Review sessions_history for details.",
+      ].join("\n");
+    } else {
+      triggerMessage = [
+        `[Subagent] "${taskLabel}" ${statusLabel}`,
+        `session: ${params.childSessionKey}`,
+        "",
+        `Summary: ${summaryText}`,
+        "",
+        statsLine,
+        "",
+        "Summarize this naturally for the user. Keep it brief (1-2 sentences).",
+        "Need details? Use sessions_history to read the full output.",
+        "You can respond with NO_REPLY if no announcement is needed.",
+      ].join("\n");
+    }
 
     const queued = await maybeQueueSubagentAnnounce({
       requesterSessionKey: params.requesterSessionKey,

@@ -3,21 +3,21 @@
  *
  * 核心功能：
  * 1. 并发限制（最多 MAX_CONCURRENT 个 subagent）
- * 2. 状态查询（用于提示词注入）
- * 3. 完成回调触发（通知主 agent）
+ * 2. 总数上限（运行中 + 已完成 ≤ MAX_RETAINED_SUBAGENTS）
+ * 3. 状态查询（用于提示词注入）
+ * 4. 完成回调触发（通知主 agent）
  */
 
-import type { SubagentRunRecord } from "./subagent-registry.js";
 import type { SubagentRunOutcome } from "./subagent-announce.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
-import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
+import type { SubagentRunRecord } from "./subagent-registry.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
+import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
 
 // 最大并发 subagent 数量
 export const MAX_CONCURRENT_SUBAGENTS = 5;
 
-// 已完成 subagent 保留时间（用于状态注入）
-const COMPLETED_RETENTION_MS = 5 * 60 * 1000; // 5 分钟
+// 运行中 + 已完成 subagent 总数上限
+export const MAX_RETAINED_SUBAGENTS = 15;
 
 // 运行中的 subagent 上下文
 export type SubagentContext = {
@@ -28,6 +28,7 @@ export type SubagentContext = {
   label?: string;
   startedAt: number;
   model?: string;
+  planMode?: boolean;
 };
 
 // 已完成的 subagent 结果
@@ -43,8 +44,10 @@ export type SubagentResult = {
   summary?: string;
   // 是否已通知主 agent
   notified: boolean;
-  // 完成时间戳（用于清理）
+  // 完成时间戳
   completedAt: number;
+  planMode?: boolean;
+  planApproved?: boolean;
 };
 
 // 格式化时长
@@ -80,19 +83,14 @@ class SubagentManager {
       return;
     }
     this.cleanupTimer = setInterval(() => {
-      this.cleanupOldCompleted();
+      this.cleanupExpiredReservations();
     }, 60_000); // 每分钟清理一次
     this.cleanupTimer.unref?.();
   }
 
-  // 清理过期的已完成记录和超时的预留
-  private cleanupOldCompleted() {
+  // 清理超时的预留槽位（不再按时间清理已完成记录）
+  private cleanupExpiredReservations() {
     const now = Date.now();
-    for (const [runId, result] of this.completed.entries()) {
-      if (now - result.completedAt > COMPLETED_RETENTION_MS) {
-        this.completed.delete(runId);
-      }
-    }
     // 清理超时的预留槽位（30秒未注册则释放）
     for (const [reserveId, info] of this.reserved.entries()) {
       if (now - info.reservedAt > 30_000) {
@@ -104,7 +102,9 @@ class SubagentManager {
   // 获取指定 session 的活跃数量（包括预留槽位）
   private getActiveCountForSession(requesterSessionKey: string): number {
     const key = requesterSessionKey.trim();
-    if (!key) return 0;
+    if (!key) {
+      return 0;
+    }
     const runningCount = [...this.running.values()].filter(
       (ctx) => ctx.requesterSessionKey === key,
     ).length;
@@ -114,13 +114,60 @@ class SubagentManager {
     return runningCount + reservedCount;
   }
 
+  // 获取指定 session 的总数（运行中 + 已完成 + 预留）
+  private getTotalCountForSession(requesterSessionKey: string): number {
+    const key = requesterSessionKey.trim();
+    if (!key) {
+      return 0;
+    }
+    const runningCount = [...this.running.values()].filter(
+      (ctx) => ctx.requesterSessionKey === key,
+    ).length;
+    const completedCount = [...this.completed.values()].filter(
+      (r) => r.requesterSessionKey === key,
+    ).length;
+    const reservedCount = [...this.reserved.values()].filter(
+      (info) => info.requesterSessionKey === key,
+    ).length;
+    return runningCount + completedCount + reservedCount;
+  }
+
+  // 列出指定 session 的可删除 subagent（用于提示主 agent）
+  private getSuggestionsForRemoval(requesterSessionKey: string): string[] {
+    const key = requesterSessionKey.trim();
+    if (!key) {
+      return [];
+    }
+    return [...this.completed.values()]
+      .filter((r) => r.requesterSessionKey === key)
+      .toSorted((a, b) => a.completedAt - b.completedAt)
+      .slice(0, 3)
+      .map((r) => r.runId);
+  }
+
   // 原子预留槽位（返回 reserveId 用于后续注册或释放）
-  reserveSlot(requesterSessionKey: string): { allowed: boolean; reserveId?: string; reason?: string } {
+  reserveSlot(requesterSessionKey: string): {
+    allowed: boolean;
+    reserveId?: string;
+    reason?: string;
+    suggestions?: string[];
+  } {
+    // 检查并发限制
     const activeCount = this.getActiveCountForSession(requesterSessionKey);
     if (activeCount >= MAX_CONCURRENT_SUBAGENTS) {
       return {
         allowed: false,
         reason: `已达到并发限制：最多 ${MAX_CONCURRENT_SUBAGENTS} 个 subagent`,
+      };
+    }
+    // 检查总数上限
+    const totalCount = this.getTotalCountForSession(requesterSessionKey);
+    if (totalCount >= MAX_RETAINED_SUBAGENTS) {
+      const suggestions = this.getSuggestionsForRemoval(requesterSessionKey);
+      return {
+        allowed: false,
+        reason: `已达到总数上限：最多 ${MAX_RETAINED_SUBAGENTS} 个 subagent（运行中 + 已完成）。请用 sessions_subagent_remove 删除已完成的 subagent 后重试。`,
+        suggestions,
       };
     }
     const reserveId = crypto.randomUUID();
@@ -143,6 +190,13 @@ class SubagentManager {
       return {
         allowed: false,
         reason: `已达到并发限制：最多 ${MAX_CONCURRENT_SUBAGENTS} 个 subagent`,
+      };
+    }
+    const totalCount = this.getTotalCountForSession(requesterSessionKey);
+    if (totalCount >= MAX_RETAINED_SUBAGENTS) {
+      return {
+        allowed: false,
+        reason: `已达到总数上限：最多 ${MAX_RETAINED_SUBAGENTS} 个 subagent`,
       };
     }
     return { allowed: true };
@@ -216,38 +270,11 @@ class SubagentManager {
   }
 
   // 触发主 agent 回调
+  // 注意：不再通过 enqueueSystemEvent 注入完整回调消息，
+  // 改由 announce flow 统一发送精简消息，避免上下文膨胀
   private triggerMainAgentCallback(result: SubagentResult) {
-    const taskLabel = result.label || result.task;
-    const statusText =
-      result.outcome.status === "ok"
-        ? "成功完成"
-        : result.outcome.status === "error"
-          ? `失败: ${result.outcome.error || "未知错误"}`
-          : result.outcome.status === "timeout"
-            ? "超时"
-            : "完成";
-
-    const durationText = formatDuration(result.endedAt - result.startedAt);
-
-    // 构造回调消息
-    const callbackText = [
-      `[后台任务完成] "${taskLabel}" ${statusText} (耗时 ${durationText})`,
-      result.summary ? `结果摘要: ${result.summary}` : null,
-      "请决定如何处理这个结果。",
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    // 注入到系统事件队列
-    enqueueSystemEvent(callbackText, {
-      sessionKey: result.requesterSessionKey,
-      contextKey: `subagent-${result.runId}`,
-    });
-
-    // 唤醒心跳以触发主 agent
+    // 只保留心跳唤醒（让主 agent 感知 subagent 完成）
     requestHeartbeatNow({ reason: "subagent-completed", coalesceMs: 1000 });
-
-    // 标记已通知
     result.notified = true;
   }
 
@@ -260,19 +287,15 @@ class SubagentManager {
     return [...this.running.values()].filter((ctx) => ctx.requesterSessionKey === key);
   }
 
-  // 获取指定 session 的最近完成的 subagent
+  // 获取指定 session 的所有已完成 subagent（不再按时间过滤）
   getRecentCompletedForSession(requesterSessionKey: string): SubagentResult[] {
     const key = requesterSessionKey.trim();
     if (!key) {
       return [];
     }
-    const now = Date.now();
     return [...this.completed.values()]
-      .filter(
-        (result) =>
-          result.requesterSessionKey === key && now - result.completedAt < COMPLETED_RETENTION_MS,
-      )
-      .sort((a, b) => b.completedAt - a.completedAt);
+      .filter((result) => result.requesterSessionKey === key)
+      .toSorted((a, b) => b.completedAt - a.completedAt);
   }
 
   // 获取指定 session 的待处理完成通知
@@ -286,17 +309,19 @@ class SubagentManager {
     );
   }
 
-  // 生成状态文本（用于系统提示词注入）
+  // 生成状态文本（用于系统提示词注入）— 显示全部 subagent
   getStatusForPrompt(sessionKey: string): string {
     const active = this.getActiveForSession(sessionKey);
-    const recent = this.getRecentCompletedForSession(sessionKey);
+    const completed = this.getRecentCompletedForSession(sessionKey);
 
-    if (active.length === 0 && recent.length === 0) {
+    if (active.length === 0 && completed.length === 0) {
       return "";
     }
 
     const lines: string[] = ["## 后台任务状态"];
     const now = Date.now();
+    const total = active.length + completed.length;
+    lines.push(`(${total}/${MAX_RETAINED_SUBAGENTS} slots used)`);
 
     if (active.length > 0) {
       lines.push("");
@@ -304,16 +329,15 @@ class SubagentManager {
       for (const ctx of active) {
         const duration = formatDuration(now - ctx.startedAt);
         const label = ctx.label || ctx.task.slice(0, 50);
-        lines.push(`- [${label}] 运行中 (${duration})`);
+        const planTag = ctx.planMode ? " [PLAN]" : "";
+        lines.push(`- \`${ctx.runId.slice(0, 8)}\` [${label}]${planTag} 运行中 (${duration})`);
       }
     }
 
-    // 只显示未通知的完成任务
-    const unnotified = recent.filter((r) => !r.notified);
-    if (unnotified.length > 0) {
+    if (completed.length > 0) {
       lines.push("");
-      lines.push("**刚完成（待处理）:**");
-      for (const result of unnotified.slice(0, 5)) {
+      lines.push("**已完成:**");
+      for (const result of completed) {
         const label = result.label || result.task.slice(0, 50);
         const statusText =
           result.outcome.status === "ok"
@@ -321,26 +345,72 @@ class SubagentManager {
             : result.outcome.status === "error"
               ? "失败"
               : result.outcome.status;
-        lines.push(`- [${label}] ${statusText}: ${result.summary || "(无摘要)"}`);
+        const planTag = result.planMode
+          ? result.planApproved
+            ? " [PLAN:APPROVED]"
+            : " [PLAN:AWAITING APPROVAL]"
+          : "";
+        lines.push(
+          `- \`${result.runId.slice(0, 8)}\` [${label}]${planTag} ${statusText} | session: ${result.childSessionKey}`,
+        );
       }
     }
 
     return lines.join("\n");
   }
 
+  // 删除已完成的 subagent（释放槽位）
+  removeSubagent(
+    runId: string,
+    requesterSessionKey: string,
+  ): { success: boolean; reason?: string } {
+    const key = requesterSessionKey.trim();
+    // 检查是否在运行中（不允许删除）
+    if (this.running.has(runId)) {
+      return {
+        success: false,
+        reason: "Cannot remove a running subagent. Wait for it to complete first.",
+      };
+    }
+    const result = this.completed.get(runId);
+    if (!result) {
+      return { success: false, reason: `Subagent "${runId}" not found in completed list.` };
+    }
+    // 权限检查：只能删除自己 session 下的
+    if (result.requesterSessionKey !== key) {
+      return {
+        success: false,
+        reason: "Permission denied: subagent belongs to a different session.",
+      };
+    }
+    this.completed.delete(runId);
+    return { success: true };
+  }
+
   // 从 SubagentRunRecord 同步状态
   syncFromRecord(record: SubagentRunRecord) {
     // 如果已结束，标记完成
     if (record.endedAt && record.outcome) {
-      if (!this.completed.has(record.runId) && !this.running.has(record.runId)) {
-        // 已经完成但不在我们的记录中，可能是重启后恢复的
-        return;
-      }
       if (this.running.has(record.runId)) {
         this.markCompleted({
           runId: record.runId,
           outcome: record.outcome,
           endedAt: record.endedAt,
+        });
+      } else if (!this.completed.has(record.runId)) {
+        // 重启后恢复：将已完成记录同步到 completed map（用于总数上限计算）
+        this.completed.set(record.runId, {
+          runId: record.runId,
+          childSessionKey: record.childSessionKey,
+          requesterSessionKey: record.requesterSessionKey,
+          task: record.task,
+          label: record.label,
+          startedAt: record.startedAt ?? record.createdAt,
+          endedAt: record.endedAt,
+          outcome: record.outcome,
+          notified: true, // 重启恢复的记录视为已通知
+          completedAt: record.endedAt,
+          planMode: record.planMode,
         });
       }
       return;
@@ -355,6 +425,7 @@ class SubagentManager {
         task: record.task,
         label: record.label,
         startedAt: record.startedAt ?? record.createdAt,
+        planMode: record.planMode,
       });
     }
   }
@@ -395,6 +466,7 @@ export function reserveSubagentSlot(requesterSessionKey: string): {
   allowed: boolean;
   reserveId?: string;
   reason?: string;
+  suggestions?: string[];
 } {
   return subagentManager.reserveSlot(requesterSessionKey);
 }
@@ -417,4 +489,12 @@ export function getActiveSubagentsForSession(sessionKey: string): SubagentContex
 // 便捷函数：获取最近完成的 subagent 列表
 export function getRecentCompletedSubagentsForSession(sessionKey: string): SubagentResult[] {
   return subagentManager.getRecentCompletedForSession(sessionKey);
+}
+
+// 便捷函数：删除已完成的 subagent
+export function removeSubagent(
+  runId: string,
+  requesterSessionKey: string,
+): { success: boolean; reason?: string } {
+  return subagentManager.removeSubagent(runId, requesterSessionKey);
 }
