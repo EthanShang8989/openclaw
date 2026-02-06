@@ -105,6 +105,16 @@
 - 用 `stringEnum`/`optionalStringEnum` 代替
 - 不用 `format` 作属性名（保留字）
 
+### 自重启禁令
+
+- **绝对禁止**通过 Bash 执行 `systemctl restart/stop/start openclaw` 或任何重启 OpenClaw 服务的命令
+- **绝对禁止**未经用户确认就触发 gateway restart
+- 遇到需要重启的情况（cron 报错、配置变更等）：
+  1. 向用户说明问题和需要重启的原因
+  2. 等待用户明确确认
+  3. 用户确认后使用 `./scripts/deploy-local.sh restart`
+- 发现错误时应**修复代码**而非重启服务
+
 ### CLI Backend 配置
 
 - 默认配置: `src/agents/cli-backends.ts`
