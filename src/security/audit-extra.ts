@@ -1121,7 +1121,8 @@ function formatCodeSafetyDetails(findings: SkillScanFinding[], rootDir: string):
         relPath && relPath !== "." && !relPath.startsWith("..")
           ? relPath
           : path.basename(finding.file);
-      return `  - [${finding.ruleId}] ${finding.message} (${filePath}:${finding.line})`;
+      const normalizedPath = filePath.replaceAll("\\", "/");
+      return `  - [${finding.ruleId}] ${finding.message} (${normalizedPath}:${finding.line})`;
     })
     .join("\n");
 }
