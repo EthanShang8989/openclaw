@@ -6,9 +6,13 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+<<<<<<< HEAD
+
 - Agents: bump pi-mono packages to 0.52.5. (#9949) Thanks @gumadeiras.
 - Models: default Anthropic model to `anthropic/claude-opus-4-6`. (#9853) Thanks @TinyTb.
-- Models/Onboarding: refresh provider defaults, update OpenAI/OpenAI Codex wizard defaults, and harden model allowlist initialization for first-time configs with matching docs/tests. (#9911) Thanks @gumadeiras.
+- # Models/Onboarding: refresh provider defaults, update OpenAI/OpenAI Codex wizard defaults, and harden model allowlist initialization for first-time configs with matching docs/tests. (#9911) Thanks @gumadeiras.
+- Models: default Anthropic model to `anthropic/claude-opus-4-6`. (#9853) Thanks @TinyTb.
+  > > > > > > > eb80b9acb (feat: add Claude Opus 4.6 to built-in model catalog (#9853))
 - Telegram: auto-inject forum topic `threadId` in message tool and subagent announce so media, buttons, and subagent results land in the correct topic instead of General. (#7235) Thanks @Lukavyi.
 - Security: add skill/plugin code safety scanner that detects dangerous patterns (command injection, eval, data exfiltration, obfuscated code, crypto mining, env harvesting) in installed extensions. Integrated into `openclaw security audit --deep` and plugin install flow; scan failures surface as warnings. (#9806) Thanks @abdelsfane.
 - CLI: sort `openclaw --help` commands (and options) alphabetically. (#8068) Thanks @deepsoumya617.
