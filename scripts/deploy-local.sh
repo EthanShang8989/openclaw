@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# OpenClaw 本地开发部署脚本
-# 用途: 从本地 WSL 同步代码到服务器并重启服务
+# OpenClaw VPS 本地部署脚本
+# 用途: 在 VPS 上本地构建、重启 OpenClaw Gateway 服务
 # =============================================================================
 
 set -e
@@ -19,8 +19,6 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # 配置
-SERVER="${DEPLOY_SERVER:-openclaws}"
-REMOTE_DIR="${REMOTE_DIR:-/opt/openclaw}"
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # =============================================================================
@@ -84,67 +82,50 @@ build_local() {
 }
 
 # =============================================================================
-# 同步代码到服务器
+# 安装依赖 + 构建 + 重启服务
 # =============================================================================
-sync_code() {
-    log_info "同步代码到 $SERVER:$REMOTE_DIR ..."
+build_restart() {
+    build_local
 
-    rsync -avz --delete \
-        --exclude 'node_modules' \
-        --exclude '.git' \
-        --exclude '.claude' \
-        --exclude '*.log' \
-        --exclude '.DS_Store' \
-        --exclude 'apps/macos/.build' \
-        --exclude 'apps/android/.gradle' \
-        --exclude 'apps/android/app/build' \
-        "$LOCAL_DIR/" "$SERVER:$REMOTE_DIR/"
+    log_info "重启服务..."
+    sudo systemctl restart openclaw
 
-    log_success "代码同步完成"
+    sleep 3
+
+    # 检查状态
+    if sudo systemctl is-active --quiet openclaw; then
+        log_success "服务已启动"
+        sudo systemctl status openclaw --no-pager | head -10
+    else
+        log_error "服务启动失败"
+        sudo journalctl -u openclaw -n 20 --no-pager
+        exit 1
+    fi
+
+    log_success "部署完成"
 }
 
 # =============================================================================
-# 服务器端构建和重启
+# 快速部署 (跳过 Git 检查和依赖安装，仅构建 + 重启)
 # =============================================================================
-remote_build_restart() {
-    log_info "服务器端安装依赖并构建..."
+quick_deploy() {
+    build_local
 
-    ssh "$SERVER" << 'EOF'
-set -e
-cd /opt/openclaw
+    log_info "重启服务..."
+    sudo systemctl restart openclaw
 
-# 设置 PATH
-export PATH="/usr/local/bin:$PATH"
+    sleep 3
 
-# 安装依赖
-echo "[INFO] 安装依赖..."
-pnpm install --frozen-lockfile
+    if sudo systemctl is-active --quiet openclaw; then
+        log_success "服务已启动"
+        sudo systemctl status openclaw --no-pager | head -10
+    else
+        log_error "服务启动失败"
+        sudo journalctl -u openclaw -n 20 --no-pager
+        exit 1
+    fi
 
-# 构建
-echo "[INFO] 构建..."
-pnpm build
-
-# 设置权限
-chown -R openclaw:openclaw /opt/openclaw
-
-# 重启服务
-echo "[INFO] 重启服务..."
-systemctl restart openclaw
-
-sleep 3
-
-# 检查状态
-if systemctl is-active --quiet openclaw; then
-    echo "[OK] 服务已启动"
-    systemctl status openclaw --no-pager | head -10
-else
-    echo "[ERROR] 服务启动失败"
-    journalctl -u openclaw -n 20 --no-pager
-    exit 1
-fi
-EOF
-
-    log_success "部署完成"
+    log_success "快速部署完成"
 }
 
 # =============================================================================
@@ -152,7 +133,9 @@ EOF
 # =============================================================================
 quick_restart() {
     log_info "快速重启服务..."
-    ssh "$SERVER" "systemctl restart openclaw && sleep 2 && systemctl status openclaw --no-pager | head -10"
+    sudo systemctl restart openclaw
+    sleep 2
+    sudo systemctl status openclaw --no-pager | head -10
     log_success "重启完成"
 }
 
@@ -160,37 +143,35 @@ quick_restart() {
 # 查看日志
 # =============================================================================
 show_logs() {
-    ssh "$SERVER" "journalctl -u openclaw -f"
+    sudo journalctl -u openclaw -f
 }
 
 # =============================================================================
 # 查看状态
 # =============================================================================
 show_status() {
-    ssh "$SERVER" "systemctl status openclaw"
+    sudo systemctl status openclaw
 }
 
 # =============================================================================
 # 完整部署流程
 # =============================================================================
 full_deploy() {
-    check_git_sync
-    build_local
-    sync_code
-    remote_build_restart
+    # 本地部署不强制 Git 检查，有未提交改动也可部署
+    build_restart
 }
 
 # =============================================================================
 # 帮助
 # =============================================================================
 show_help() {
-    echo "OpenClaw 本地开发部署脚本"
+    echo "OpenClaw VPS 本地部署脚本"
     echo ""
     echo "用法: $0 [命令]"
     echo ""
     echo "命令:"
-    echo "  deploy    完整部署 (Git检查 + 构建 + 同步 + 远程构建 + 重启)"
-    echo "  sync      仅同步代码 (不构建不重启，跳过Git检查)"
+    echo "  deploy    完整部署 (Git检查 + 安装依赖 + 构建 + 重启服务)"
+    echo "  quick     快速部署 (仅构建 + 重启，跳过检查和依赖安装)"
     echo "  build     仅本地构建"
     echo "  restart   快速重启服务 (不重新构建)"
     echo "  status    查看服务状态"
@@ -202,13 +183,10 @@ show_help() {
     echo "  - 本地不能落后于远程 (需要先 pull)"
     echo "  - 未跟踪文件会提示确认"
     echo ""
-    echo "环境变量:"
-    echo "  DEPLOY_SERVER  服务器别名 (默认: openclaws)"
-    echo "  REMOTE_DIR     远程目录 (默认: /opt/openclaw)"
-    echo ""
     echo "示例:"
-    echo "  $0 deploy              # 完整部署 (推荐)"
-    echo "  $0 sync && $0 restart  # 紧急修复: 跳过检查直接同步"
+    echo "  $0 deploy     # 完整部署 (推荐)"
+    echo "  $0 quick      # 快速部署: 跳过检查，直接构建重启"
+    echo "  $0 restart    # 紧急修复: 仅重启服务"
     echo ""
 }
 
@@ -220,8 +198,8 @@ main() {
         deploy|d)
             full_deploy
             ;;
-        sync|s)
-            sync_code
+        quick|q)
+            quick_deploy
             ;;
         build|b)
             build_local
