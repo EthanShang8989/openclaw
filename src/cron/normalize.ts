@@ -46,6 +46,11 @@ function coerceSchedule(schedule: UnknownRecord) {
     }
   }
 
+  // 防御：kind=cron 但 expr 无效时，设为空字符串让 schedule.ts 安全返回 undefined
+  if (next.kind === "cron" && (typeof next.expr !== "string" || !next.expr.trim())) {
+    next.expr = "";
+  }
+
   if (atString) {
     next.at = parsedAtMs ? new Date(parsedAtMs).toISOString() : atString;
   } else if (parsedAtMs !== null) {

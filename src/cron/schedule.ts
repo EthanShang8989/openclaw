@@ -22,7 +22,12 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     return anchor + steps * everyMs;
   }
 
-  const expr = schedule.expr.trim();
+  // 防御性检查：expr 可能为 undefined（配置热重载时 schedule 字段不完整）
+  const rawExpr = (schedule as { expr?: string }).expr;
+  if (!rawExpr || typeof rawExpr !== "string") {
+    return undefined;
+  }
+  const expr = rawExpr.trim();
   if (!expr) {
     return undefined;
   }

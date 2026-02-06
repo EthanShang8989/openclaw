@@ -42,6 +42,7 @@ const GATEWAY_ACTIONS = [
 const GatewayToolSchema = Type.Object({
   action: stringEnum(GATEWAY_ACTIONS),
   // restart
+  confirmed: Type.Optional(Type.Boolean()),
   delayMs: Type.Optional(Type.Number()),
   reason: Type.Optional(Type.String()),
   // config.get, config.schema, config.apply, update.run
@@ -69,7 +70,7 @@ export function createGatewayTool(opts?: {
     label: "Gateway",
     name: "gateway",
     description:
-      "Restart, apply config, or update the gateway in-place (SIGUSR1). Use config.patch for safe partial config updates (merges with existing). Use config.apply only when replacing entire config. Both trigger restart after writing.",
+      "Restart, apply config, or update the gateway in-place (SIGUSR1). Use config.patch for safe partial config updates (merges with existing). Use config.apply only when replacing entire config. Both trigger restart after writing. Use confirmed=true only after getting explicit user approval.",
     parameters: GatewayToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -77,6 +78,16 @@ export function createGatewayTool(opts?: {
       if (action === "restart") {
         if (opts?.config?.commands?.restart !== true) {
           throw new Error("Gateway restart is disabled. Set commands.restart=true to enable.");
+        }
+        // 重启前必须经过用户确认
+        const confirmed = params.confirmed === true;
+        if (!confirmed) {
+          return jsonResult({
+            ok: false,
+            error: "confirmation_required",
+            message:
+              "Restart requires explicit user confirmation. Explain the reason to the user, get their approval, then call again with confirmed=true.",
+          });
         }
         const sessionKey =
           typeof params.sessionKey === "string" && params.sessionKey.trim()
