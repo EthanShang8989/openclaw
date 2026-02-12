@@ -6,6 +6,7 @@ import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
 import type { TypingSignaler } from "./typing-mode.js";
 import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
+import { resolveCliBackendConfig } from "../../agents/cli-backends.js";
 import { runCliAgent, type CliAgentRunResult } from "../../agents/cli-runner.js";
 import { formatInteractionQuestion } from "../../agents/cli-runner/interaction-format.js";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../../agents/pi-embedded-helpers.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import { resolveSandboxContext } from "../../agents/sandbox.js";
+import { runSdkAgent } from "../../agents/sdk-runner.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveGroupSessionKey,
@@ -216,7 +218,11 @@ export async function runAgentTurnWithFallback(params: {
                   );
                 }
 
-                const result = await runCliAgent({
+                // 检查是否使用 SDK 模式（进程内 query() 替代子进程调用）
+                const cliBackend = resolveCliBackendConfig(provider, params.followupRun.run.config);
+                const useSdk = cliBackend?.config.useSdk && !toolResult;
+
+                const cliRunParams = {
                   sessionId: params.followupRun.run.sessionId,
                   sessionKey: params.sessionKey,
                   agentId: params.followupRun.run.agentId,
@@ -235,7 +241,11 @@ export async function runAgentTurnWithFallback(params: {
                   images: params.opts?.images,
                   sandboxContext: sandboxContext ?? undefined,
                   toolResult,
-                });
+                };
+
+                const result: CliAgentRunResult = useSdk
+                  ? await runSdkAgent(cliRunParams)
+                  : await runCliAgent(cliRunParams);
 
                 // 检测并处理 CLI 交互请求
                 let finalResult: CliAgentRunResult = result;

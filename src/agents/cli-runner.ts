@@ -34,6 +34,7 @@ import {
 import { writeCliEventsToSession } from "./cli-runner/session-writer.js";
 import { resolveOpenClawDocsPath } from "./docs-path.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
+import { generateMcpConfig } from "./oc-mcp/config.js";
 import {
   classifyFailoverReason,
   isFailoverErrorMessage,
@@ -302,6 +303,22 @@ export async function runCliAgent(params: {
     useResume,
   });
 
+  // MCP 工具桥：生成临时配置，让 CC CLI 连接 OC 的 MCP server
+  let mcpCleanup: (() => void) | undefined;
+  if (backend.enableMcp && params.sessionKey) {
+    try {
+      const mcp = await generateMcpConfig({ sessionKey: params.sessionKey });
+      mcpCleanup = mcp.cleanup;
+      args.push("--mcp-config", mcp.configPath);
+      log.info(`mcp config injected: ${mcp.configPath}`);
+    } catch (mcpErr) {
+      log.warn(
+        `[oc-mcp] failed to generate mcp config: ${mcpErr instanceof Error ? mcpErr.message : String(mcpErr)}`,
+      );
+      // MCP 配置生成失败不影响 CLI 运行
+    }
+  }
+
   const serialize = backend.serialize ?? true;
   const queueKey = serialize ? backendResolved.id : `${backendResolved.id}:${params.runId}`;
 
@@ -513,6 +530,7 @@ export async function runCliAgent(params: {
     }
     throw err;
   } finally {
+    mcpCleanup?.();
     if (cleanupImages) {
       await cleanupImages();
     }

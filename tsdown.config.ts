@@ -42,4 +42,10 @@ export default defineConfig([
     fixedExtension: false,
     platform: "node",
   },
+  {
+    entry: "src/oc-mcp-serve.ts",
+    env,
+    fixedExtension: false,
+    platform: "node",
+  },
 ]);

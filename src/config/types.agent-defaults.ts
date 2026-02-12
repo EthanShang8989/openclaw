@@ -100,6 +100,10 @@ export type CliBackendConfig = {
    * - "always": always use sandbox if available
    */
   sandboxMode?: "off" | "inherit" | "always";
+  /** 启用 OC MCP 工具桥，让 CC CLI 可调用 OC 的工具（记忆搜索、subagent 状态等）。 */
+  enableMcp?: boolean;
+  /** 使用 Claude Agent SDK（进程内）替代子进程调用 CC CLI。启用后 MCP 工具在进程内运行。 */
+  useSdk?: boolean;
   /** CLI-specific sandbox configuration overrides. */
   sandboxOverrides?: {
     /** Docker image for CLI sandbox (overrides global sandbox image). */

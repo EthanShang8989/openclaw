@@ -53,6 +53,11 @@ const DEFAULT_CLAUDE_BACKEND: CliBackendConfig = {
   serialize: true,
   // Enable full tool capabilities (Bash/Read/Write/Edit/etc.)
   enableTools: true,
+  // Phase B stdio MCP 默认关闭（进程隔离导致 subagentManager 为空）。
+  // SDK 模式（useSdk: true）使用进程内 MCP，不受此配置影响。
+  enableMcp: false,
+  // SDK 模式默认关闭，通过配置启用（进程内 query() 替代子进程调用）
+  useSdk: false,
   // Sandbox mode inherited from session context
   sandboxMode: "inherit",
 };
