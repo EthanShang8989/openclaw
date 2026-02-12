@@ -35,6 +35,7 @@ import { buildReplyPayloads } from "./agent-runner-payloads.js";
 import { appendUsageLine, formatResponseUsageLine } from "./agent-runner-utils.js";
 import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-reply-pipeline.js";
 import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
+import { shouldRotateCliSession, prepareCliSessionRotation } from "./cli-context-guard.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
@@ -213,6 +214,44 @@ export async function runReplyAgent(params: {
     isHeartbeat,
   });
 
+  // CLI 上下文主动轮转守卫 — 在溢出发生之前清除 CC session
+  if (
+    activeSessionEntry &&
+    shouldRotateCliSession({
+      entry: activeSessionEntry,
+      provider: followupRun.run.provider,
+      model: followupRun.run.model ?? defaultModel,
+      agentCfgContextTokens,
+      cfg,
+    })
+  ) {
+    defaultRuntime.error(
+      `[cli-context-rotate] proactive rotation: session=${sessionKey} tokens=${activeSessionEntry.totalTokens}`,
+    );
+    prepareCliSessionRotation(activeSessionEntry);
+    if (storePath && sessionKey && activeSessionStore) {
+      activeSessionStore[sessionKey] = activeSessionEntry;
+      try {
+        await updateSessionStore(storePath, (store) => {
+          const existing = store[sessionKey];
+          if (existing) {
+            store[sessionKey] = {
+              ...existing,
+              cliSessionIds: undefined,
+              claudeCliSessionId: undefined,
+              totalTokens: undefined,
+              inputTokens: undefined,
+              outputTokens: undefined,
+              updatedAt: Date.now(),
+            };
+          }
+        });
+      } catch (err) {
+        defaultRuntime.error(`[cli-context-rotate] failed to persist rotation: ${String(err)}`);
+      }
+    }
+  }
+
   const runFollowupTurn = createFollowupRunner({
     opts,
     typing,
@@ -251,6 +290,17 @@ export async function runReplyAgent(params: {
       updatedAt: Date.now(),
       systemSent: false,
       abortedLastRun: false,
+      // 清除 CLI session 关联 — 强制下次创建新 CC session
+      cliSessionIds: undefined,
+      claudeCliSessionId: undefined,
+      // 重置 token 统计 — 避免新 session 立即再次触发轮转
+      totalTokens: undefined,
+      inputTokens: undefined,
+      outputTokens: undefined,
+      // 重置 compaction/flush 状态
+      compactionCount: undefined,
+      memoryFlushCompactionCount: undefined,
+      memoryFlushAt: undefined,
     };
     const agentId = resolveAgentIdFromSessionKey(sessionKey);
     const nextSessionFile = resolveSessionTranscriptPath(
@@ -396,6 +446,18 @@ export async function runReplyAgent(params: {
       systemPromptReport: runResult.meta.systemPromptReport,
       cliSessionId,
     });
+
+    // CLI 上下文使用率日志
+    if (cliSessionId && usage) {
+      const usageRatio = (usage.total ?? 0) / contextTokensUsed;
+      if (usageRatio > 0.5) {
+        defaultRuntime.error(
+          `[cli-context] session=${cliSessionId} ` +
+            `tokens=${usage.total ?? 0}/${contextTokensUsed} ` +
+            `(${(usageRatio * 100).toFixed(0)}%) key=${sessionKey}`,
+        );
+      }
+    }
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and

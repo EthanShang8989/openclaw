@@ -598,6 +598,26 @@ export async function runAgentTurnWithFallback(params: {
           },
         };
       }
+      // CLI 上下文溢出：轮转 session 自动恢复
+      if (
+        isContextOverflow &&
+        !didResetAfterCompactionFailure &&
+        isCliProvider(params.followupRun.run.provider, params.followupRun.run.config)
+      ) {
+        const didReset = await params.resetSessionAfterCompactionFailure(
+          `CLI context overflow: ${message.slice(0, 200)}`,
+        );
+        if (didReset) {
+          didResetAfterCompactionFailure = true;
+          return {
+            kind: "final",
+            payload: {
+              text: "⚠️ Context overflow detected. Session has been automatically reset - please try again.",
+            },
+          };
+        }
+      }
+
       if (isRoleOrderingError) {
         const didReset = await params.resetSessionAfterRoleOrderingConflict(message);
         if (didReset) {

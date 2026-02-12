@@ -1,4 +1,6 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
+import fs from "node:fs";
+import path from "node:path";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { DetectedInteraction } from "./cli-runner/interaction-manager.js";
@@ -32,7 +34,12 @@ import {
 import { writeCliEventsToSession } from "./cli-runner/session-writer.js";
 import { resolveOpenClawDocsPath } from "./docs-path.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
-import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-helpers.js";
+import {
+  classifyFailoverReason,
+  isFailoverErrorMessage,
+  isLikelyContextOverflowError,
+} from "./pi-embedded-helpers.js";
+import { getSubagentStatusForPrompt } from "./subagent-manager.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "./workspace-run.js";
 
 const log = createSubsystemLogger("agent/claude-cli");
@@ -168,6 +175,26 @@ export async function runCliAgent(params: {
   const extraSystemPrompt = [params.extraSystemPrompt?.trim(), toolsDisabledPrompt]
     .filter(Boolean)
     .join("\n");
+
+  // 写入最新的 subagent 状态到 workspace CLAUDE.md，
+  // CC CLI 每次 invocation（包括 resume）都会重新读取
+  const subagentStatus = params.sessionKey
+    ? getSubagentStatusForPrompt(params.sessionKey)
+    : undefined;
+  if (subagentStatus) {
+    const claudeMdPath = path.join(workspaceDir, "CLAUDE.md");
+    try {
+      await fs.promises.writeFile(
+        claudeMdPath,
+        `# OpenCLAW Runtime Status\n\n${subagentStatus}\n`,
+        "utf-8",
+      );
+    } catch (e) {
+      log.warn(
+        `[subagent-status] failed to write CLAUDE.md: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
 
   const sessionLabel = params.sessionKey ?? params.sessionId;
   const { contextFiles } = await resolveBootstrapContextForRun({
@@ -393,6 +420,15 @@ export async function runCliAgent(params: {
 
       if (result.code !== 0) {
         const err = stderr || stdout || "CLI failed.";
+
+        // 检测上下文溢出 — 不走模型 failover（同一 CC session，所有模型都会溢出）
+        if (isLikelyContextOverflowError(err)) {
+          log.warn(
+            `[cli-context-overflow] provider=${params.provider}/${modelId} err=${err.slice(0, 200)}`,
+          );
+          throw new Error(`context overflow: ${err}`);
+        }
+
         const reason = classifyFailoverReason(err) ?? "unknown";
         const status = resolveFailoverStatus(reason);
         throw new FailoverError(err, {

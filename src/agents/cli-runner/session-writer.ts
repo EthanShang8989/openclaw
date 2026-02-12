@@ -4,6 +4,10 @@ import path from "node:path";
 import type { CliStreamJsonlOutput } from "./helpers.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
+import {
+  truncateToolResultText,
+  HARD_MAX_TOOL_RESULT_CHARS,
+} from "../pi-embedded-runner/tool-result-truncation.js";
 
 const log = createSubsystemLogger("agent/cli-session-writer");
 
@@ -110,14 +114,15 @@ export async function writeCliEventsToSession(params: {
       } as never);
     }
 
-    // 为每个工具结果添加 toolResult 消息
+    // 为每个工具结果添加 toolResult 消息（裁剪超大结果）
     for (const toolResult of events.toolResults) {
       const toolName = toolIdToName.get(toolResult.toolUseId) ?? "unknown";
+      const content = truncateToolResultText(toolResult.content, HARD_MAX_TOOL_RESULT_CHARS);
       sessionManager.appendMessage({
         role: "toolResult",
         toolCallId: toolResult.toolUseId,
         toolName,
-        content: [{ type: "text", text: toolResult.content }],
+        content: [{ type: "text", text: content }],
         isError: toolResult.isError,
         timestamp: timestamp + 1,
       } as never);
