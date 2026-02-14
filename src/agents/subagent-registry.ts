@@ -1,3 +1,4 @@
+import type { TaskWorkflow } from "./task-workflow/types.js";
 import { loadConfig } from "../config/config.js";
 import { callGateway } from "../gateway/call.js";
 import { onAgentEvent } from "../infra/agent-events.js";
@@ -27,6 +28,7 @@ export type SubagentRunRecord = {
   cleanupCompletedAt?: number;
   cleanupHandled?: boolean;
   planMode?: boolean;
+  workflow?: TaskWorkflow;
 };
 
 const subagentRuns = new Map<string, SubagentRunRecord>();
@@ -43,6 +45,13 @@ function persistSubagentRuns() {
   } catch {
     // ignore persistence failures
   }
+}
+
+/**
+ * 外部触发持久化（供 MCP 工具在更新工作流状态后调用）
+ */
+export function persistSubagentRegistry() {
+  persistSubagentRuns();
 }
 
 const resumedRuns = new Set<string>();
@@ -79,6 +88,7 @@ function resumeSubagentRun(runId: string) {
       label: entry.label,
       outcome: entry.outcome,
       planMode: entry.planMode,
+      workflow: entry.workflow,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(runId, entry.cleanup, didAnnounce);
     });
@@ -250,6 +260,7 @@ function ensureListener() {
       label: entry.label,
       outcome: entry.outcome,
       planMode: entry.planMode,
+      workflow: entry.workflow,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(evt.runId, entry.cleanup, didAnnounce);
     });
@@ -305,6 +316,7 @@ export function registerSubagentRun(params: {
   model?: string;
   reserveId?: string; // 从 subagentManager.reserveSlot 获得的预留 ID
   planMode?: boolean;
+  workflow?: TaskWorkflow;
 }) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -326,6 +338,7 @@ export function registerSubagentRun(params: {
     archiveAtMs,
     cleanupHandled: false,
     planMode: params.planMode || undefined,
+    workflow: params.workflow,
   });
 
   // 同步到 subagentManager 以支持状态查询（会自动释放预留槽位）
@@ -339,6 +352,7 @@ export function registerSubagentRun(params: {
       startedAt: now,
       model: params.model,
       planMode: params.planMode,
+      workflow: params.workflow,
     },
     params.reserveId,
   );
@@ -438,6 +452,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       label: entry.label,
       outcome: entry.outcome,
       planMode: entry.planMode,
+      workflow: entry.workflow,
     }).then((didAnnounce) => {
       finalizeSubagentCleanup(runId, entry.cleanup, didAnnounce);
     });

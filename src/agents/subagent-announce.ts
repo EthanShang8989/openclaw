@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import type { TaskWorkflow } from "./task-workflow/types.js";
 import { resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { loadConfig } from "../config/config.js";
 import {
@@ -25,6 +26,10 @@ import {
   waitForEmbeddedPiRunEnd,
 } from "./pi-embedded.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "./subagent-announce-queue.js";
+import {
+  buildWorkflowPromptSection,
+  buildWorkflowProgressSummary,
+} from "./task-workflow/prompt.js";
 import { readLatestAssistantReply } from "./tools/agent-step.js";
 
 function formatTokenCount(value?: number) {
@@ -322,6 +327,7 @@ export function buildSubagentSystemPrompt(params: {
   label?: string;
   task?: string;
   planMode?: boolean;
+  workflow?: TaskWorkflow;
 }) {
   const taskText =
     typeof params.task === "string" && params.task.trim()
@@ -371,6 +377,11 @@ export function buildSubagentSystemPrompt(params: {
       "5. After approval, you'll continue in this session to implement",
       "",
     );
+  }
+
+  // 工作流任务列表注入
+  if (params.workflow) {
+    lines.push(buildWorkflowPromptSection(params.workflow));
   }
 
   lines.push(
@@ -434,6 +445,7 @@ export async function runSubagentAnnounceFlow(params: {
   outcome?: SubagentRunOutcome;
   announceType?: SubagentAnnounceType;
   planMode?: boolean;
+  workflow?: TaskWorkflow;
 }): Promise<boolean> {
   let didAnnounce = false;
   let shouldDeleteChildSession = params.cleanup === "delete";
@@ -567,10 +579,13 @@ export async function runSubagentAnnounceFlow(params: {
         "The plan subagent did not complete successfully. Review sessions_history for details.",
       ].join("\n");
     } else {
+      const workflowLine = params.workflow
+        ? `\nWorkflow: ${buildWorkflowProgressSummary(params.workflow)}\n`
+        : "";
       triggerMessage = [
         `[Subagent] "${taskLabel}" ${statusLabel}`,
         `session: ${params.childSessionKey}`,
-        "",
+        workflowLine,
         `Summary: ${summaryText}`,
         "",
         statsLine,

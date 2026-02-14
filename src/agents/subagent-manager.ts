@@ -10,8 +10,10 @@
 
 import type { SubagentRunOutcome } from "./subagent-announce.js";
 import type { SubagentRunRecord } from "./subagent-registry.js";
+import type { TaskWorkflow, WorkflowTaskStatus } from "./task-workflow/types.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
+import { updateTask, getProgress } from "./task-workflow/manager.js";
 
 // 最大并发 subagent 数量
 export const MAX_CONCURRENT_SUBAGENTS = 5;
@@ -29,6 +31,7 @@ export type SubagentContext = {
   startedAt: number;
   model?: string;
   planMode?: boolean;
+  workflow?: TaskWorkflow;
 };
 
 // 已完成的 subagent 结果
@@ -48,6 +51,7 @@ export type SubagentResult = {
   completedAt: number;
   planMode?: boolean;
   planApproved?: boolean;
+  workflow?: TaskWorkflow;
 };
 
 // 格式化时长
@@ -428,6 +432,42 @@ class SubagentManager {
         planMode: record.planMode,
       });
     }
+  }
+
+  // 更新工作流任务状态（由 oc_task_update MCP 工具调用）
+  updateWorkflowTask(
+    childSessionKey: string,
+    taskId: string,
+    status: WorkflowTaskStatus,
+    note?: string,
+  ): { success: boolean; error?: string; progress?: string } {
+    // 在运行中的 subagent 中查找匹配的 workflow
+    for (const ctx of this.running.values()) {
+      if (ctx.childSessionKey === childSessionKey && ctx.workflow) {
+        const err = updateTask(ctx.workflow, taskId, status, note);
+        if (err) {
+          return { success: false, error: err };
+        }
+        return { success: true, progress: getProgress(ctx.workflow) };
+      }
+    }
+    return { success: false, error: `未找到 session "${childSessionKey}" 的工作流` };
+  }
+
+  // 获取指定 subagent session 的工作流
+  getWorkflow(childSessionKey: string): TaskWorkflow | undefined {
+    for (const ctx of this.running.values()) {
+      if (ctx.childSessionKey === childSessionKey && ctx.workflow) {
+        return ctx.workflow;
+      }
+    }
+    // 也检查已完成的
+    for (const result of this.completed.values()) {
+      if (result.childSessionKey === childSessionKey && result.workflow) {
+        return result.workflow;
+      }
+    }
+    return undefined;
   }
 
   // 获取统计信息

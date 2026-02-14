@@ -15,11 +15,17 @@ import {
   subagentListToolDef,
   subagentSendToolDef,
 } from "./subagent-status.js";
+import { handleTaskUpdate, taskUpdateToolDef } from "./task-update.js";
 
 export type McpToolParams = OcMcpServerParams;
 
 /** 所有工具定义 */
-const ALL_TOOL_DEFS = [memorySearchToolDef, subagentListToolDef, subagentSendToolDef];
+const ALL_TOOL_DEFS = [
+  memorySearchToolDef,
+  subagentListToolDef,
+  subagentSendToolDef,
+  taskUpdateToolDef,
+];
 
 /** 工具名 → handler 映射 */
 type ToolHandler = (
@@ -32,6 +38,7 @@ function buildHandlerMap(params: McpToolParams): Map<string, ToolHandler> {
   map.set(memorySearchToolDef.name, handleMemorySearch);
   map.set(subagentListToolDef.name, handleSubagentList);
   map.set(subagentSendToolDef.name, handleSubagentSend);
+  map.set(taskUpdateToolDef.name, handleTaskUpdate);
   void params;
   return map;
 }

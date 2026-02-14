@@ -15,7 +15,8 @@ import { resolveSessionAgentIds } from "../agent-scope.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../bootstrap-files.js";
 import { resolveCliBackendConfig, type ResolvedCliBackend } from "../cli-backends.js";
 import { resolveOpenClawDocsPath } from "../docs-path.js";
-import { getSubagentStatusForPrompt } from "../subagent-manager.js";
+import { getSubagentStatusForPrompt, subagentManager } from "../subagent-manager.js";
+import { buildWorkflowProgressSummary } from "../task-workflow/prompt.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { buildSystemPrompt, normalizeCliModel } from "./helpers.js";
 
@@ -82,12 +83,20 @@ export async function prepareAgentRun(params: {
   const subagentStatus = params.sessionKey
     ? getSubagentStatusForPrompt(params.sessionKey)
     : undefined;
-  if (subagentStatus) {
+  // 工作流进度（subagent 自身的任务列表）
+  const workflowProgress = params.sessionKey
+    ? (() => {
+        const wf = subagentManager.getWorkflow(params.sessionKey);
+        return wf ? buildWorkflowProgressSummary(wf) : undefined;
+      })()
+    : undefined;
+  const claudeMdContent = [subagentStatus, workflowProgress].filter(Boolean).join("\n\n");
+  if (claudeMdContent) {
     const claudeMdPath = path.join(workspaceDir, "CLAUDE.md");
     try {
       await fs.promises.writeFile(
         claudeMdPath,
-        `# OpenCLAW Runtime Status\n\n${subagentStatus}\n`,
+        `# OpenCLAW Runtime Status\n\n${claudeMdContent}\n`,
         "utf-8",
       );
     } catch (e) {

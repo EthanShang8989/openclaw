@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
+import type { WorkflowTaskInput } from "../task-workflow/types.js";
 import type { AnyAgentTool } from "./common.js";
 import { formatThinkingLevels, normalizeThinkLevel } from "../../auto-reply/thinking.js";
 import { loadConfig } from "../../config/config.js";
@@ -17,6 +18,7 @@ import { optionalStringEnum } from "../schema/typebox.js";
 import { buildSubagentSystemPrompt } from "../subagent-announce.js";
 import { reserveSubagentSlot, releaseSubagentSlot } from "../subagent-manager.js";
 import { registerSubagentRun } from "../subagent-registry.js";
+import { createWorkflow } from "../task-workflow/manager.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
   resolveDisplaySessionKey,
@@ -35,6 +37,16 @@ const SessionsSpawnToolSchema = Type.Object({
   timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
   planMode: Type.Optional(Type.Boolean()),
+  workflow: Type.Optional(
+    Type.Array(
+      Type.Object({
+        id: Type.String(),
+        subject: Type.String(),
+        description: Type.Optional(Type.String()),
+        dependsOn: Type.Optional(Type.Array(Type.String())),
+      }),
+    ),
+  ),
 });
 
 function splitModelRef(ref?: string) {
@@ -94,6 +106,13 @@ export function createSessionsSpawnTool(opts?: {
       const modelOverride = readStringParam(params, "model");
       const thinkingOverrideRaw = readStringParam(params, "thinking");
       const planMode = params.planMode === true;
+      // 解析工作流任务列表
+      const workflowInput = Array.isArray(params.workflow)
+        ? (params.workflow as WorkflowTaskInput[])
+        : undefined;
+      const workflow = workflowInput?.length
+        ? createWorkflow(label || task.slice(0, 80), workflowInput)
+        : undefined;
       // planMode 时强制 cleanup = "keep"（需要保留 session 以便后续 sessions_send 审批）
       const cleanup = planMode
         ? "keep"
@@ -265,6 +284,7 @@ export function createSessionsSpawnTool(opts?: {
         label: label || undefined,
         task,
         planMode,
+        workflow,
       });
 
       const childIdem = crypto.randomUUID();
@@ -323,6 +343,7 @@ export function createSessionsSpawnTool(opts?: {
         model: resolvedModel,
         reserveId, // 传入预留 ID，注册时会自动释放
         planMode,
+        workflow,
       });
 
       return jsonResult({
