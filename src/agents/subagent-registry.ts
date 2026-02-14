@@ -406,11 +406,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
     }
     const waitError = typeof wait.error === "string" ? wait.error : undefined;
     entry.outcome =
-      wait.status === "error"
-        ? { status: "error", error: waitError }
-        : wait.status === "timeout"
-          ? { status: "timeout" }
-          : { status: "ok" };
+      wait.status === "error" ? { status: "error", error: waitError } : { status: "ok" };
     mutated = true;
     if (mutated) {
       persistSubagentRuns();

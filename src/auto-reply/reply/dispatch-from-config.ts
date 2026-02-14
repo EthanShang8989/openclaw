@@ -3,10 +3,7 @@ import type { FinalizedMsgContext } from "../templating.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import {
-  formatCancelConfirmation,
-  formatResumeMessage,
-} from "../../agents/cli-runner/interaction-format.js";
+import { formatCancelConfirmation } from "../../agents/cli-runner/interaction-format.js";
 import {
   clearPendingInteraction,
   getPendingInteraction,

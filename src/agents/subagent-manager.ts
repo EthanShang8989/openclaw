@@ -12,7 +12,6 @@ import type { SubagentRunOutcome } from "./subagent-announce.js";
 import type { SubagentRunRecord } from "./subagent-registry.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
 
 // 最大并发 subagent 数量
 export const MAX_CONCURRENT_SUBAGENTS = 5;
@@ -295,10 +294,7 @@ class SubagentManager {
       return [];
     }
     return [...this.completed.values()]
-      .filter(
-        (result) =>
-          result.requesterSessionKey === key && now - result.completedAt < COMPLETED_RETENTION_MS,
-      )
+      .filter((result) => result.requesterSessionKey === key)
       .toSorted((a, b) => b.completedAt - a.completedAt);
   }
 
